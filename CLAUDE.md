@@ -20,6 +20,7 @@ A collection of independent MCP (Model Context Protocol) servers built with [Fas
 | `memory_notes/` | Memory & Notes | Persistent key-value memory across sessions (JSON file backend) |
 | `command_docs/` | Command Docs | man pages, tldr cheat sheets, and cheat.sh community recipes |
 | `awesome_lists/` | Awesome Lists | Browse/search the sindresorhus/awesome meta-list (local repo) |
+| `llm_tools/` | LLM Tools | Delegate tasks (summarize, ask, code review, data interpretation) to local models via LM Studio API |
 
 ## Commands
 
@@ -103,6 +104,20 @@ All subprocess calls go through `run_command()` which uses `subprocess.run` with
 ### Local SearXNG (`local_searxng/`)
 
 Requires a SearXNG instance running locally. URL defaults to `http://localhost:8080/search` and can be overridden with the `SEARXNG_URL` environment variable.
+
+### LLM Tools (`llm_tools/`)
+
+Calls LM Studio's OpenAI-compatible API at `http://localhost:1234/v1` (default).
+Override via `LM_STUDIO_URL` env var — set to `http://localhost:11434/v1` for Ollama.
+Override the auto-selected model via `LLM_TOOLS_DEFAULT_MODEL` env var.
+
+- `list_available_models()` → call first in any session to see loaded model IDs and context sizes.
+- `summarize(text, style, model)` → four styles: concise / detailed / bullets / eli5. Temperature 0.3.
+- `ask_model(prompt, context, model, system_prompt, temperature)` → RAG synthesis step; context injected as a separate section in the user message.
+- `analyze_code(code, language, model)` → structured review: Correctness, Performance, Security, Style, Top Improvements. Temperature 0.2.
+- `interpret_data(data, question, model)` → plain-language data analysis. Temperature 0.4.
+- Model resolution order: explicit arg > `LLM_TOOLS_DEFAULT_MODEL` env var > first loaded model > hardcoded fallback.
+- A module-level `_client` is lazily initialized to avoid blocking the MCP handshake.
 
 ### Command Docs (`command_docs/`)
 
