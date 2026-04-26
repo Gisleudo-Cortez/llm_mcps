@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 from typing import Literal
 
@@ -153,15 +154,25 @@ def search_contents(pattern: str, path: str = ".", max_matches: int = 100) -> st
 
     *Typical workflow:* list_directory → search_contents(pattern="function_name") → read_file(matching_path)
     """
-    cmd = [
-        "ugrep",
-        "-rnI",  # r: recursive, n: line numbers, I: ignore binaries
-        "--color=never",  # Strip ANSI colors
-        "-m",
-        str(max_matches),  # Limit matches per file
-        pattern,
-        path,
-    ]
+    if shutil.which("ugrep"):
+        cmd = [
+            "ugrep",
+            "-rnI",  # r: recursive, n: line numbers, I: ignore binaries
+            "--color=never",
+            "-m", str(max_matches),
+            pattern,
+            path,
+        ]
+    else:
+        cmd = [
+            "grep",
+            "-rn",
+            "--color=never",
+            "--binary-files=without-match",
+            "-m", str(max_matches),
+            pattern,
+            path,
+        ]
     return run_command(cmd)
 
 
@@ -213,8 +224,9 @@ def query_packages(
 # --- Tool 5: Git Operations Suite ---
 @mcp.tool()
 def git_operations(
-    operation: Literal["status", "diff", "log"],
+    operation: Literal["status", "diff", "log", "show", "blame"],
     repo_path: str = ".",
+    target: str = "",
     max_lines: int = 500,
 ) -> str:
     """
@@ -227,13 +239,16 @@ def git_operations(
     **SEQUENCE GUIDANCE:** Start with `operation="status"` for an overview of modified/untracked files.
     Use `operation="diff"` to see exact code changes in working directory vs. last commit.
     Use `operation="log"` for commit history review (limited to 10 most recent by default).
+    Use `operation="show"` with `target=<commit_hash>` to inspect a specific commit's changes.
+    Use `operation="blame"` with `target=<file_path>` to see which commit last changed each line.
     Always verify repo_path points to a valid Git repository before calling.
 
     **CONSTRAINT WARNING:** Do not attempt write operations (commit, push, branch creation) through this tool—
     it is read-only only. For large repositories with extensive diffs, the output may be truncated
     at `max_lines` for context protection. The repo_path must contain a `.git` directory or the call will fail.
+    `show` and `blame` require a non-empty `target` parameter.
 
-    **OUTPUT EXPECTATION:** Returns formatted Git state information: status shows modified files, diff shows code changes, log shows commit history.
+    **OUTPUT EXPECTATION:** Returns formatted Git state information: status shows modified files, diff shows code changes, log shows commit history, show displays a commit's full patch, blame annotates each line with its last commit.
     Ideal for code review preparation, debugging merge conflicts, understanding project history,
     and verifying repository state before making modifications.
 
@@ -249,15 +264,21 @@ def git_operations(
     base_cmd = ["git", "-C", repo_path]
 
     if operation == "status":
-        # Uses --short to save tokens while providing clear state
         cmd = base_cmd + ["status", "--short", "--branch"]
     elif operation == "diff":
         cmd = base_cmd + ["diff", "--no-color"]
     elif operation == "log":
-        # Limits to the last 10 commits natively to prevent massive log dumps
         cmd = base_cmd + ["log", "-n", "10", "--oneline", "--no-color"]
-    #    else:
-    #        return f"Error: Unsupported git operation '{operation}'."
+    elif operation == "show":
+        if not target:
+            return "Error: 'target' must be a commit hash for the 'show' operation."
+        cmd = base_cmd + ["show", "--no-color", target]
+    elif operation == "blame":
+        if not target:
+            return "Error: 'target' must be a file path for the 'blame' operation."
+        cmd = base_cmd + ["blame", "--no-color", target]
+    else:
+        return f"Error: Unsupported git operation '{operation}'."
 
     output = run_command(cmd)
 
@@ -511,40 +532,41 @@ def service_status(service_name: str) -> str:
 
 # --- Tool 12: Container Fleet Status (docker) ---
 @mcp.tool()
-def container_status(operation: Literal["list", "stats"] = "list") -> str:
+def container_status(
+    operation: Literal["list", "stats", "logs"] = "list",
+    container_name: str = "",
+) -> str:
     """
     Inspect Docker containers and their resource usage without running continuous monitoring.
 
     **TRIGGER CONDITION:** Use this when you need to verify container health, check resource allocation, or identify which containers are consuming system resources. Call after noticing performance issues that may be related to containerized applications.
 
-    **SEQUENCE GUIDANCE:** Start with `operation="list"` for overview of all containers (running and stopped). Use `operation="stats"` when investigating high CPU/memory usage attributed to Docker processes. This tool provides snapshots only—not continuous monitoring (to avoid hanging subprocesses).
+    **SEQUENCE GUIDANCE:** Start with `operation="list"` for overview of all containers (running and stopped). Use `operation="stats"` when investigating high CPU/memory usage. Use `operation="logs"` with `container_name` to tail the last 100 lines of a container's stdout/stderr. This tool provides snapshots only—not continuous monitoring.
 
-    **CONSTRAINT WARNING:** Requires Docker daemon running locally; if Docker is not installed or service is down, the tool returns an error. The "list" operation shows all containers regardless of state; use output filtering to focus on specific containers. For real-time streaming stats, this tool captures a single snapshot—use external monitoring tools for continuous observation.
+    **CONSTRAINT WARNING:** Requires Docker daemon running locally. `logs` and `stats` operations require a valid `container_name`. Container names may differ from image names—use `list` first to find the correct name.
 
-    **OUTPUT EXPECTATION:** Returns formatted container information: list mode shows ID, names, status, and exposed ports; stats mode shows CPU%, memory usage, and network I/O per container. Ideal for debugging container failures, monitoring resource allocation, identifying problematic containers, and verifying deployment health.
+    **OUTPUT EXPECTATION:** Returns formatted container information: list mode shows ID, names, status, and exposed ports; stats mode shows CPU%, memory usage, and network I/O; logs mode returns the last 100 timestamped log lines.
 
     *Prerequisites:* Docker installed and daemon running (`systemctl status docker`).
 
-    *Typical workflow:* container_status(operation="list") → service_status("docker") (if issues detected)
+    *Typical workflow:* container_status(operation="list") → container_status(operation="logs", container_name="my-app")
     """
     if operation == "list":
-        # Formatted to be visually dense but highly structured for LLM parsing
         cmd = [
-            "docker",
-            "ps",
-            "-a",
-            "--format",
-            "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}",
+            "docker", "ps", "-a",
+            "--format", "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}",
         ]
     elif operation == "stats":
-        # --no-stream captures a single point-in-time snapshot, preventing the subprocess from hanging
         cmd = [
-            "docker",
-            "stats",
-            "--no-stream",
-            "--format",
-            "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}",
+            "docker", "stats", "--no-stream",
+            "--format", "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}",
         ]
+    elif operation == "logs":
+        if not container_name:
+            return "Error: 'container_name' is required for the 'logs' operation."
+        if not re.match(r"^[a-zA-Z0-9_.-]+$", container_name):
+            return "Error: Invalid container name format."
+        cmd = ["docker", "logs", "--tail", "100", "--timestamps", container_name]
     else:
         return f"Error: Invalid container operation '{operation}'."
 
@@ -639,73 +661,6 @@ def test_connectivity(host: str, method: Literal["ping", "http"] = "ping") -> st
         return f"Error: Invalid connectivity method '{method}'."
 
     return run_command(cmd)
-
-
-# --- Tool 17: Manual Page Lookup (man) ---
-@mcp.tool()
-def man_lookup(command: str) -> str:
-    """
-    Retrieve full manual page documentation for terminal commands using `man`.
-
-    **TRIGGER CONDITION:** Use this when you need comprehensive command documentation, flag descriptions,
-    or usage examples. Call after encountering an unfamiliar command or needing to verify available options.
-
-    **SEQUENCE GUIDANCE:** Always provide exact command name (e.g., "ls", "grep", "systemctl"). For commands in specific sections (rarely needed), append section number (e.g., "ls(1)"). Combine results with `tldr_lookup` for quick practical examples if the full manual page is too verbose.
-
-    **CONSTRAINT WARNING:** Command names must be valid alphanumeric strings with hyphens/underscores—special characters are rejected. If a man page doesn't exist, the tool returns an error rather than hanging (unlike interactive `man` usage). Some commands may have multiple man pages across sections; this tool retrieves the first match found.
-
-    **OUTPUT EXPECTATION:** Returns full manual page content including SYNOPSIS, DESCRIPTION, OPTIONS, EXAMPLES, and SEE ALSO sections. Ideal for learning new commands, verifying flag syntax, understanding complex options, troubleshooting command failures due to incorrect usage, and reference documentation during development.
-
-    *Typical workflow:* man_lookup(command="tar") → tldr_lookup(command="tar") (for quick examples)
-    """
-    # Input sanitization: allow only valid command name characters
-    if not re.match(r"^[a-zA-Z0-9_-]+$", command):
-        return "Error: Invalid command name format. Use alphanumeric names with hyphens/underscores."
-
-    if not command.strip():
-        return "Error: Command name cannot be empty."
-
-    cmd = ["man", "-P", "cat", command]
-    output = run_command(cmd)
-
-    # Detect man page not found error (stderr typically contains this)
-    if "No manual entry" in output or "can't open" in output.lower():
-        return f"Error: No manual page found for '{command}'. Check spelling or ensure the package is installed."
-
-    return output
-
-
-# --- Tool 18: TLDR Cheat Sheet Lookup (tldr) ---
-@mcp.tool()
-def tldr_lookup(command: str) -> str:
-    """
-    Retrieve simplified cheat sheet with practical command examples using `tldr`.
-
-    **TRIGGER CONDITION:** Use this when you need quick, practical usage examples rather than exhaustive documentation. Ideal for recalling common patterns, verifying correct syntax, or learning commands through examples. Call after running `man_lookup` if the full manual is too verbose.
-
-    **SEQUENCE GUIDANCE:** Always provide exact command name (e.g., "tar", "docker", "git"). This tool provides community-maintained examples—ideal for common use cases but may not cover edge cases or advanced options found in man pages. For complete reference, follow up with `man_lookup` after reviewing tldr examples.
-
-    **CONSTRAINT WARNING:** Not all commands have TLDR pages available—if none exists, the tool returns an error suggesting to check the full man page instead. Examples are community-contributed and may vary in quality; always verify against official documentation for critical operations. TLDR focuses on practical usage rather than complete flag enumeration.
-
-    **OUTPUT EXPECTATION:** Returns simplified command cheat sheet with real-world examples grouped by use case. Ideal for quick reference, learning command syntax through examples, recalling common patterns, and accelerating workflow without reading full documentation.
-
-    *Typical workflow:* tldr_lookup(command="docker") → docker commands (for practical usage)
-    """
-    # Input sanitization: allow only valid command name characters
-    if not re.match(r"^[a-zA-Z0-9_-]+$", command):
-        return "Error: Invalid command name format. Use alphanumeric names with hyphens/underscores."
-
-    if not command.strip():
-        return "Error: Command name cannot be empty."
-
-    cmd = ["tldr", command]
-    output = run_command(cmd)
-
-    # Detect tldr entry not found error (stderr typically contains this)
-    if "No documentation" in output or "not found" in output.lower():
-        return f"Error: No TLDR page found for '{command}'. Try checking the full man page instead."
-
-    return output
 
 
 if __name__ == "__main__":

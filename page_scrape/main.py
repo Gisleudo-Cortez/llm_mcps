@@ -205,5 +205,119 @@ def fetch_url_content(
         return f"Error: An unexpected parsing error occurred - {str(e)}"
 
 
+@mcp.tool()
+def extract_links(
+    url: str,
+    filter_text: str = "",
+    internal_only: bool = False,
+    max_links: int = 500,
+) -> str:
+    """
+    Extract and catalog all hyperlinks from a URL for site mapping or link discovery.
+
+    **TRIGGER CONDITION:** Use when you need to map the link structure of a page, discover
+    all referenced URLs, or gather a list of resources linked from a document. Ideal for
+    site audits, crawling preparation, and discovering API endpoints or related pages.
+
+    **SEQUENCE GUIDANCE:** Call after identifying a target URL. Use `filter_text` to narrow
+    results to links containing a specific keyword (e.g., "/api/", "github.com"). Set
+    `internal_only=True` to restrict to links on the same domain. Pipe the resulting URLs
+    to `fetch_url_content` for deeper extraction.
+
+    **CONSTRAINT WARNING:** URL must start with http:// or https://. Pages with
+    JavaScript-rendered links (SPAs) may return fewer links than visible in a browser.
+    `max_links` caps output to protect context — increase only when needed. Relative URLs
+    are resolved to absolute using the page's base URL.
+
+    **OUTPUT EXPECTATION:** Returns a deduplicated, sorted list of absolute URLs with their
+    anchor text, grouped by domain. Includes a summary of total and unique link counts.
+
+    *Typical workflow:* extract_links(url) → fetch_url_content(url=one_of_the_links)
+    """
+    if not url.startswith(("http://", "https://")):
+        return "Error: Invalid URL format. URL must start with http:// or https://"
+
+    try:
+        response = session.get(url, timeout=30)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "lxml")
+        base_url = response.url
+        parsed_base = urllib.parse.urlparse(base_url)
+        base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+
+        seen: set[str] = set()
+        links: list[dict] = []
+
+        for tag in soup.find_all("a", href=True):
+            href = str(tag["href"]).strip()
+            if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                continue
+
+            abs_url = urllib.parse.urljoin(base_url, href)
+            parsed = urllib.parse.urlparse(abs_url)
+            if parsed.scheme not in ("http", "https"):
+                continue
+
+            is_internal = parsed.netloc == parsed_base.netloc
+            if internal_only and not is_internal:
+                continue
+
+            text = tag.get_text(strip=True)[:120]
+
+            if filter_text and filter_text.lower() not in abs_url.lower() and filter_text.lower() not in text.lower():
+                continue
+
+            if abs_url not in seen:
+                seen.add(abs_url)
+                links.append(
+                    {
+                        "url": abs_url,
+                        "text": text,
+                        "domain": parsed.netloc,
+                        "internal": is_internal,
+                    }
+                )
+
+        if not links:
+            qualifier = f" matching '{filter_text}'" if filter_text else ""
+            return f"No links found{qualifier} on {url}."
+
+        total = len(links)
+        links = links[:max_links]
+        truncated = total > max_links
+
+        # Group by domain for readability
+        by_domain: dict[str, list[dict]] = {}
+        for link in links:
+            by_domain.setdefault(link["domain"], []).append(link)
+
+        output = [
+            f"### Links extracted from: {url}",
+            f"- Total unique links: {total}"
+            + (f" (showing first {max_links})" if truncated else ""),
+            f"- Domains represented: {len(by_domain)}",
+            f"- Filter applied: '{filter_text}'" if filter_text else "",
+            "",
+        ]
+
+        for domain, domain_links in sorted(by_domain.items()):
+            tag_label = "(internal)" if domain_links[0]["internal"] else ""
+            output.append(f"**{domain}** {tag_label} — {len(domain_links)} link(s)")
+            for link in domain_links:
+                label = f' "{link["text"]}"' if link["text"] else ""
+                output.append(f"  - {link['url']}{label}")
+            output.append("")
+
+        return "\n".join(line for line in output if line is not None)
+
+    except requests.exceptions.Timeout:
+        return "Error: Request timed out after 30 seconds."
+    except requests.exceptions.RequestException as e:
+        return f"Error: Network request failed — {str(e)}"
+    except Exception as e:
+        return f"Error: An unexpected error occurred — {str(e)}"
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

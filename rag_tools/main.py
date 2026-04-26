@@ -5,6 +5,8 @@ import os
 import re
 from datetime import datetime
 
+import numpy as np
+
 import fitz  # PyMuPDF
 import pandas as pd
 import pypdf
@@ -18,7 +20,7 @@ mcp = FastMCP("RAG Document Tools")
 md_converter = MarkItDown()
 
 # Initialize Vector DB Storage (Instant)
-DB_PATH = "./chroma_db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
 chroma_client = PersistentClient(path=DB_PATH)
 
 # Lazy-Loaded Embedding Model (Prevents Timeout during MCP Handshake)
@@ -34,6 +36,32 @@ def get_embed_model():
 
         _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _embed_model
+
+
+# --- Helper: Sentence-aware text chunker ---
+def _chunk_text(text: str, chunk_target: int = 800, overlap: int = 100) -> list[str]:
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    current_len = 0
+    for sent in sentences:
+        sent_len = len(sent)
+        if current_len + sent_len > chunk_target and current_chunk:
+            chunks.append(" ".join(current_chunk))
+            overlap_sents: list[str] = []
+            overlap_len = 0
+            for s in reversed(current_chunk):
+                if overlap_len + len(s) > overlap:
+                    break
+                overlap_sents.insert(0, s)
+                overlap_len += len(s)
+            current_chunk = overlap_sents
+            current_len = overlap_len
+        current_chunk.append(sent)
+        current_len += sent_len
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+    return chunks
 
 
 # --- Helper: Format File Size ---
@@ -299,34 +327,10 @@ def index_document_for_search(file_path: str, collection_name: str = "default") 
     """
 
     text = read_doc_content(file_path, max_chars=1_000_000)
-    if text.startswith("Error"):
-        return text
+    if not text.strip() or text.startswith("Error") or text.startswith("Document was read"):
+        return f"Error: Could not extract text from '{file_path}'. Run get_doc_metadata to verify the file."
 
-    # --- Sentence-aware chunking ---
-    # Split on sentence boundaries, then greedily pack into ~800-char chunks
-    # with 100-char overlap to preserve cross-sentence context.
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    chunks, current_chunk, current_len = [], [], 0
-    CHUNK_TARGET, OVERLAP = 800, 100
-
-    for sent in sentences:
-        sent_len = len(sent)
-        if current_len + sent_len > CHUNK_TARGET and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            # Keep last ~OVERLAP chars worth of sentences for context overlap
-            overlap_sents, overlap_len = [], 0
-            for s in reversed(current_chunk):
-                if overlap_len + len(s) > OVERLAP:
-                    break
-                overlap_sents.insert(0, s)
-                overlap_len += len(s)
-            current_chunk = overlap_sents
-            current_len = overlap_len
-        current_chunk.append(sent)
-        current_len += sent_len
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
+    chunks = _chunk_text(text)
 
     if not chunks:
         return "Error: No text content found to index."
@@ -473,6 +477,41 @@ def list_indexed_collections() -> str:
 
 
 @mcp.tool()
+def list_indexed_files(collection_name: str = "default") -> str:
+    """
+    List all source files indexed within a specific collection, with per-file chunk counts.
+
+    **TRIGGER CONDITION:** Use this after `list_indexed_collections` to drill into a collection
+    and see exactly which files it contains—before searching, deleting, or re-indexing.
+
+    **SEQUENCE GUIDANCE:** Call `list_indexed_collections` first to confirm the collection exists,
+    then `list_indexed_files` to see its contents. Use the returned paths as `source_filter`
+    values in `semantic_search` to narrow results to a specific document.
+
+    **OUTPUT EXPECTATION:** Returns file paths with chunk counts per file, sorted alphabetically.
+    """
+    try:
+        collection = chroma_client.get_collection(name=collection_name)
+        results = collection.get(include=["metadatas"])
+        metadatas = results.get("metadatas") or []
+
+        if not metadatas:
+            return f"Collection '{collection_name}' exists but contains no indexed documents."
+
+        from collections import Counter
+        counts: Counter = Counter(m.get("source", "unknown") for m in metadatas)
+
+        lines = [f"### Files in collection '{collection_name}'\n"]
+        for path, count in sorted(counts.items()):
+            lines.append(f"- `{path}` — {count} chunk{'s' if count != 1 else ''}")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error listing indexed files: {str(e)}"
+
+
+@mcp.tool()
 def delete_from_index(
     collection_name: str = "default",
     file_path: str = "",
@@ -548,32 +587,11 @@ def chunk_and_preview(
 
     *Recommended workflow:* get_doc_metadata → read_doc_content → chunk_and_preview → index_document_for_search
     """
-    import re
-
     text = read_doc_content(file_path, max_chars=1_000_000)
-    if text.startswith("Error"):
+    if not text.strip() or text.startswith("Error"):
         return text
 
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    chunks, current_chunk, current_len = [], [], 0
-
-    for sent in sentences:
-        sent_len = len(sent)
-        if current_len + sent_len > chunk_target and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            overlap_sents, overlap_len = [], 0
-            for s in reversed(current_chunk):
-                if overlap_len + len(s) > overlap:
-                    break
-                overlap_sents.insert(0, s)
-                overlap_len += len(s)
-            current_chunk = overlap_sents
-            current_len = overlap_len
-        current_chunk.append(sent)
-        current_len += sent_len
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
+    chunks = _chunk_text(text, chunk_target, overlap)
 
     sizes = [len(c) for c in chunks]
     avg_size = sum(sizes) / len(sizes) if sizes else 0
@@ -625,8 +643,6 @@ def compare_documents(
     *Use case examples:* "Are these two policy drafts substantially different?" → call without query.
     "What does each document say about 'data retention'?" → call with query="data retention".
     """
-    import numpy as np
-
     def cosine_similarity(a, b):
         a, b = np.array(a), np.array(b)
         return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10))
@@ -667,8 +683,6 @@ def compare_documents(
         )
 
     # Query-focused comparison: find best passage in each doc
-    import re
-
     def top_passage(text, q_emb, chunk_size=600):
         sentences = re.split(r"(?<=[.!?])\s+", text)
         chunks, cur = [], []

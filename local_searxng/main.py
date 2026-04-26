@@ -1,10 +1,11 @@
+import os
 from typing import Literal
 
 import requests
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("SearXNG Search Server")
-SEARXNG_URL = "http://localhost:8080/search"
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search")
 
 session = requests.Session()
 session.headers.update(

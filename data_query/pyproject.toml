@@ -1,0 +1,10 @@
+[project]
+name = "data-query"
+version = "0.1.0"
+description = "MCP server for querying SQLite databases and flat files via DuckDB"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp>=1.27.0",
+    "duckdb>=1.2.0",
+]
