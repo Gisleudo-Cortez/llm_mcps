@@ -10,7 +10,7 @@ A collection of independent MCP (Model Context Protocol) servers built with [Fas
 
 | Directory | Server Name | Purpose |
 |-----------|-------------|---------|
-| `page_scrape/` | Page Scrape Server | Fetch and parse web pages (Trafilatura + BeautifulSoup) |
+| `page_scrape/` | Page Scrape Server | Fetch/parse web pages; extract links for site mapping (Trafilatura + BeautifulSoup) |
 | `rag_tools/` | RAG Document Tools | Document reading, indexing, and semantic search (ChromaDB + SentenceTransformers) |
 | `current_date_time/` | System Utilities Server | Date/time tools with timezone support |
 | `arch_system_tools/` | Arch System Tools | Arch Linux system utilities (fs, packages, git, services, network, Docker) |
@@ -18,6 +18,8 @@ A collection of independent MCP (Model Context Protocol) servers built with [Fas
 | `python_repl/` | Python REPL | Execute Python code in an isolated subprocess |
 | `data_query/` | Data Query Server | SQLite queries and DuckDB analytics over CSV/Parquet/JSON |
 | `memory_notes/` | Memory & Notes | Persistent key-value memory across sessions (JSON file backend) |
+| `command_docs/` | Command Docs | man pages, tldr cheat sheets, and cheat.sh community recipes |
+| `awesome_lists/` | Awesome Lists | Browse/search the sindresorhus/awesome meta-list (local repo) |
 
 ## Commands
 
@@ -101,6 +103,28 @@ All subprocess calls go through `run_command()` which uses `subprocess.run` with
 ### Local SearXNG (`local_searxng/`)
 
 Requires a SearXNG instance running locally. URL defaults to `http://localhost:8080/search` and can be overridden with the `SEARXNG_URL` environment variable.
+
+### Command Docs (`command_docs/`)
+
+- Shares a `run_command()` helper (same pattern as `arch_system_tools`).
+- `man_lookup` calls `man -P cat` to produce plain-text man pages.
+- `tldr_lookup` calls the system `tldr` binary.
+- `cheat_sh_lookup` fetches from `https://cheat.sh/{command}/{query}?T` (plain text, ANSI stripped). Uses a shared `requests.Session`. Requires internet.
+- Intended tool call order: `tldr_lookup` → `man_lookup` (for full ref) → `cheat_sh_lookup` (for community recipes).
+- External tools required: `man`, `tldr`.
+
+### Awesome Lists (`awesome_lists/`)
+
+- Parses the local `sindresorhus/awesome` repo at `~/Downloads/git/awesome/readme.md`.
+- `_parse_sections` splits the readme by `## Heading` and extracts `- [Name](URL) - description` items from each section.
+- `search_awesome_lists(query)` → case-insensitive substring search across names and descriptions.
+- `get_awesome_category(category)` → all items in a single section (case-insensitive match).
+- No external dependencies beyond `mcp`. The readme path is hardcoded to the cloned repo location.
+
+### Page Scrape (`page_scrape/`)
+
+- `fetch_url_content` extracts clean text (Trafilatura), tables, and images from a URL.
+- `extract_links` maps all hyperlinks on a page: resolves relative URLs, deduplicates, groups by domain, supports `internal_only` and `filter_text` options.
 
 ## MCP Config
 
