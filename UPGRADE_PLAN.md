@@ -66,18 +66,48 @@ Before any upgrade, each server's irreplaceable capabilities must be protected:
 
 | Server | Irreplaceable Capability | Risk in Upgrade |
 |--------|------------------------|-----------------|
-| `page_scrape` | Trafilatura extraction + BS4 link mapping | Low — no LLM dependency |
-| `rag_tools` | ChromaDB vector store + sentence-aware chunker + image extraction | Medium — embeddings migration path needed |
-| `current_date_time` | IANA timezone math + API date range generation | None — pure computation |
-| `arch_system_tools` | Arch-specific package/service/network diagnostics | Low — no LLM dependency |
-| `local_searxng` | Local SearXNG metasearch + quality filtering | None — no LLM dependency |
-| `python_repl` | Stateless subprocess code execution | Low — could add Ollama-aware validation |
-| `data_query` | Read-only SQLite + DuckDB analytics | None — no LLM dependency |
-| `memory_notes` | Persistent key-value JSON store | Medium — upgrade to knowledge graph |
-| `command_docs` | man/tldr/cheat.sh three-tier lookup | None — no LLM dependency |
-| `awesome_lists` | sindresorhus/awesome README parser | None — no LLM dependency |
+| `page_scrape` | Trafilatura extraction + BS4 link mapping + Markdown table converter | Low — no LLM dependency |
+| `rag_tools` | ChromaDB vector store + sentence-aware chunker + PDF image extraction pipeline + MarkItDown universal converter + standalone image loader with normalization | Medium — embeddings migration path needed; vision pipeline preserved |
+| `current_date_time` | IANA timezone math + API-ready date range generation (3 formats simultaneously) | None — pure computation |
+| `arch_system_tools` | Arch-specific pacman/paru integration + Qalculate! live math + Docker fleet inspection + systemd ecosystem suite + deep input sanitization regex layer | Low — no LLM dependency |
+| `local_searxng` | Privacy-preserving SearXNG metasearch + category/time-range filtering + quality filter (_is_quality_result) | None — no LLM dependency |
+| `python_repl` | Stateless subprocess execution + dynamic package inspection + temp-file isolation | Low — could add Ollama-aware validation |
+| `data_query` | DuckDB direct-file queries (read_csv_auto/read_parquet) + SQLite read-only enforcement (?mode=ro) + dual-engine SQL | None — no LLM dependency |
+| `memory_notes` | Persistent cross-session JSON store + category-based grouping | Medium — upgrade to knowledge graph |
+| `command_docs` | Three-tier doc hierarchy (man→tldr→cheat.sh) + cheat.sh sub-query support + programming language queries | None — no LLM dependency |
+| `awesome_lists` | sindresorhus/awesome structured parser + offline category navigation | None — no LLM dependency |
 | `llm_tools` | Local LLM delegation via OpenAI-compatible API | **High — complete rewrite target** |
-| `code_check` | 20-language format + lint pipeline | Low — no LLM dependency |
+| `code_check` | Neovim toolchain parity (17 languages) + built-in JSON/TOML stdlib validation + graceful degradation for missing tools | Low — no LLM dependency |
+
+### Modelfile Inventory (Current Ollama Config)
+
+| Modelfile | Base Model | Size | Tool-Calling Template | Vision | Special |
+|-----------|-----------|------|-----------------------|--------|---------|
+| `nemotron-4b` | NVIDIA Nemotron 3 Nano | ~4B | Custom `<extra_id_N>` format | No | Fast tier candidate |
+| `qwen3.5-reasoning-vision` | Qwen 3.5 9B (Opus Distilled v2) | ~9B | Full ChatML `<tools>` + `/think` | Yes (mmproj) | Standard tier + reasoning + vision |
+| `qwen3.5-uncensored-vision` | Qwen 3.5 9B Uncensored | ~9B | Full ChatML `<tools>` + `/think` | Yes (mmproj) | Uncensored variant |
+| `qwen3.6-27b-vision` | Qwen 3.6 27B | ~27B | Full ChatML `<tools>` + `/think` | Yes (mmproj) | Standard/deep local tier |
+| `gemma4-obliterated` | Gemma 4 E4B IT Obliterated | ~4B | None (uses Ollama default) | No | Minimal modelfile |
+| `qwopus-glm-18b` | Qwopus-GLM-18B Healed | ~18B | None (uses Ollama default) | No | Minimal modelfile |
+
+**Key observation**: The 3 Qwen modelfiles share an identical tool-calling template. All support `/think` and `/no_think` reasoning control. Only the Qwen models have explicit parameters (temp=0.6, top_k=20, top_p=0.95). No modelfiles set `num_ctx` or `num_predict`.
+
+### Test Coverage Baseline
+
+| Server | Tests | Coverage Status |
+|--------|-------|----------------|
+| `llm_tools` | 22 pytest | Good — all 5 tools covered |
+| `command_docs` | 12 pytest | Good — all 3 tools + helper |
+| `awesome_lists` | 12 pytest | Good — all 3 tools + parser |
+| `page_scrape` | 14 pytest + 1 smoke | Good — both tools + helpers |
+| `rag_tools` | 0 | **Critical** — 12 tools, 785 LOC, zero tests |
+| `arch_system_tools` | 0 | **Critical** — 15 tools, 668 LOC, input sanitization untested |
+| `data_query` | 0 | **High** — SQL injection surface untested |
+| `memory_notes` | 0 | **High** — file I/O, migration risk |
+| `python_repl` | 0 | **High** — timeout/cleanup untested |
+| `code_check` | 0 | **Medium** — 17 language configs untested |
+| `local_searxng` | 0 | **Medium** — quality filter untested |
+| `current_date_time` | 0 | **Low** — pure computation, easy to test |
 
 ---
 
@@ -148,6 +178,12 @@ Architecture:
 
 Add: `httpx>=0.28.0` (for native Ollama API calls alongside OpenAI SDK).
 
+#### 3.1.5 Test Plan
+
+- All 22 existing tests must pass (backward-compatible signatures)
+- New tests for: tier routing, model resolution per tier, embed_text, model_info, generate_code
+- Integration test: verify Ollama connectivity on `localhost:11434`
+
 ---
 
 ### Phase 2: Hybrid Search in rag_tools
@@ -204,6 +240,21 @@ Target:   query → BM25 (FTS5/Whoosh) + embed → ChromaDB cosine
 | `list_indexed_collections` | Show both vector and FTS5 stats |
 | `delete_from_index` | Also delete from FTS5 |
 
+#### 3.2.4 Preserved Capabilities
+
+- ChromaDB vector store remains the primary vector backend
+- Sentence-aware chunker (`_chunk_text`) unchanged
+- PDF image extraction pipeline unchanged
+- MarkItDown universal converter unchanged
+- Standalone image loader unchanged
+- `compare_documents` cosine similarity unchanged
+
+#### 3.2.5 Test Plan
+
+- Unit: BM25 search, RRF fusion math, embed provider switching
+- Integration: hybrid vs. vector-only relevance comparison
+- Regression: existing indexing and search behavior unchanged when `search_mode="vector"`
+
 ---
 
 ### Phase 3: Knowledge Graph Memory
@@ -250,6 +301,18 @@ Inspired by `modelcontextprotocol/server-memory` (official MCP Memory) but using
 - `search_memory` with semantic mode: uses Ollama embeddings to find conceptually related entities
 - `summarize_entity(entity_name)`: uses local LLM to generate a natural-language summary of an entity's observations
 - Auto-suggest relations: after adding observations, Ollama can suggest potential relations between entities
+
+#### 3.3.5 Preserved Capabilities
+
+- Cross-session persistence (now via SQLite, not JSON)
+- Category-based organization (now as entity_type)
+- Simple key-value recall still works via `search_memory` substring mode
+
+#### 3.3.6 Test Plan
+
+- Unit: CRUD operations on entities, relations, observations
+- Migration: `memories.json` → SQLite auto-migration
+- Edge cases: empty DB, duplicate entities, circular relations, orphan observations
 
 ---
 
@@ -304,6 +367,12 @@ Dependencies:
 | `rag_tools` | Code indexed here for structural search; rag_tools for documentation search |
 | `memory_notes` → Phase 3 | Code entities stored as knowledge graph nodes |
 
+#### 3.4.5 Test Plan
+
+- Unit: tree-sitter parsing, symbol extraction, call graph construction
+- Integration: cross-repo analysis (this repo as test target)
+- Language support: start with Python, JS/TS, Go, Rust (mature bindings)
+
 ---
 
 ### Phase 5: Ollama-Enhanced Server Upgrades
@@ -312,37 +381,43 @@ Dependencies:
 
 #### 3.5.1 `page_scrape` — Smart Extraction
 
-| Enhancement | Description |
-|------------|-------------|
-| `smart_extract(url, query)` | NEW tool: fetch page + use Ollama to extract only sections relevant to a query |
-| `summarize_page(url, style)` | NEW tool: fetch + summarize in one call (replaces two-step workflow) |
+| Enhancement | Description | Model Tier |
+|------------|-------------|------------|
+| `smart_extract(url, query)` | NEW tool: fetch page + use Ollama to extract only sections relevant to a query | fast |
+| `summarize_page(url, style)` | NEW tool: fetch + summarize in one call (replaces two-step workflow) | standard |
 
 #### 3.5.2 `python_repl` — Validation Gates
 
-| Enhancement | Description |
-|------------|-------------|
-| `execute_and_validate(code, language)` | NEW tool: run code + auto-lint via code_check + auto-review via Ollama |
-| `fix_code(code, error_message)` | NEW tool: use Ollama to suggest fixes for failing code |
+| Enhancement | Description | Model Tier |
+|------------|-------------|------------|
+| `execute_and_validate(code, language)` | NEW tool: run code + auto-lint via code_check + auto-review via Ollama | standard |
+| `fix_code(code, error_message)` | NEW tool: use Ollama to suggest fixes for failing code | standard |
 
 #### 3.5.3 `data_query` — Natural Language SQL
 
-| Enhancement | Description |
-|------------|-------------|
-| `ask_database(question, db_path)` | NEW tool: Ollama generates SQL from natural language, executes it, returns results |
-| `schema_summary(db_path)` | NEW tool: Ollama generates a human-readable schema description |
+| Enhancement | Description | Model Tier |
+|------------|-------------|------------|
+| `ask_database(question, db_path)` | NEW tool: Ollama generates SQL from natural language, executes it, returns results | fast |
+| `schema_summary(db_path)` | NEW tool: Ollama generates a human-readable schema description | fast |
 
 #### 3.5.4 `local_searxng` — Research Mode
 
-| Enhancement | Description |
-|------------|-------------|
-| `deep_research(query, depth)` | NEW tool: multi-step search → scrape → synthesize loop via Ollama |
+| Enhancement | Description | Model Tier |
+|------------|-------------|------------|
+| `deep_research(query, depth)` | NEW tool: multi-step search → scrape → synthesize loop via Ollama | deep |
 
 #### 3.5.5 `arch_system_tools` — Write Operations (with Ollama safeguards)
 
-| Enhancement | Description |
-|------------|-------------|
-| `write_file(path, content)` | NEW tool: write content to a file (with backup) |
-| `git_commit(message, files)` | NEW tool: stage + commit (with Ollama-generated commit message suggestion) |
+| Enhancement | Description | Model Tier |
+|------------|-------------|------------|
+| `write_file(path, content)` | NEW tool: write content to a file (with backup) | N/A |
+| `git_commit(message, files)` | NEW tool: stage + commit (with Ollama-generated commit message suggestion) | fast |
+
+#### 3.5.6 Preserved Capabilities
+
+- All original tools in each server remain unchanged
+- New tools are additive — no existing tool signatures change
+- Ollama-dependent tools gracefully degrade when Ollama is unavailable (return error message)
 
 ---
 
@@ -553,7 +628,7 @@ User can override with explicit `model` or `tier` parameter on any call.
 |-------|-----------|----------------|
 | 1 | Unit | Model resolution, tier routing, fallback logic |
 | 1 | Integration | Ollama API connectivity (local + cloud) |
-| 1 | Regression | All 5 existing llm_tools tests still pass |
+| 1 | Regression | All 22 existing llm_tools tests still pass |
 | 2 | Unit | BM25 search, RRF fusion math |
 | 2 | Integration | Hybrid vs. vector-only relevance comparison |
 | 3 | Unit | CRUD operations on entities, relations, observations |
@@ -563,3 +638,19 @@ User can override with explicit `model` or `tier` parameter on any call.
 | 5 | Unit | Per-server new tool functionality |
 | 6 | Regression | All existing tests pass with FastMCP 3.x |
 | 7 | Integration | End-to-end multi-server workflow |
+
+---
+
+## 10. Test Gap Remediation (Pre-Phase 1)
+
+Before starting Phase 1, add minimal tests for the untested servers that Phase 1–5 will modify:
+
+| Server | Priority | Tests to Add Before Upgrade |
+|--------|----------|----------------------------|
+| `rag_tools` | Critical | `_chunk_text` unit, `semantic_search` with mock ChromaDB, `index_document_for_search` validation |
+| `memory_notes` | High | `_load`/`_save` round-trip, `remember`/`recall`/`forget` CRUD, empty-file handling |
+| `data_query` | High | SQL injection prevention, read-only enforcement, `_rows_to_markdown` |
+| `python_repl` | Medium | Timeout enforcement, temp file cleanup, output truncation |
+| `local_searxng` | Medium | `_is_quality_result` filter logic |
+
+Servers not being modified (arch_system_tools, code_check, current_date_time, command_docs, awesome_lists) can be tested later.
