@@ -1,0 +1,159 @@
+# NEXT_STEP — Ollama Max Evolution: Where We Are and What's Next
+
+**Branch:** `upgrade/ollama-max-evolution`
+**Date:** 2026-04-29
+**Status:** Phase 1 complete. Phases 2–7 pending.
+
+---
+
+## What's Been Done
+
+### Phase 1: Ollama Migration (llm_tools rewrite) — DONE ✅
+
+**Commit:** `71c0de2` — full rewrite of `llm_tools/main.py`
+
+The `llm_tools` server was rewritten from a single-LM-Studio-backend to a dual-client Ollama-native architecture with tiered model routing. All 66 tests pass (44 backward-compat + 22 new).
+
+**Key changes to `llm_tools/main.py`:**
+- `_get_client()` → OpenAI-compatible client at `OLLAMA_URL/v1` (for chat completions, backward compat)
+- `_get_native()` → `httpx.Client` at `OLLAMA_URL` (for `/api/embed`, `/api/tags`, `/api/show`, `/api/chat`)
+- `_resolve_model(tier, model)` → tier-based routing (fast/standard/deep/auto)
+- `_is_cloud_model()` → detects cloud models for higher input limits (50k vs 12k chars)
+- `_ollama_list_models()` → `GET /api/tags` for rich model metadata
+- `_ollama_model_info()` → `POST /api/show` for capabilities and context length
+- `_call_native()` → `POST /api/chat` for agent_chat tool calling
+
+**5 modified tools** (backward-compatible, new `tier` param with safe defaults):
+`list_available_models`, `summarize`, `ask_model`, `analyze_code`, `interpret_data`
+
+**4 new tools:** `embed_text`, `model_info`, `generate_code`, `agent_chat`
+
+**5 new env vars:** `OLLAMA_URL`, `OLLAMA_FAST_MODEL`, `OLLAMA_STANDARD_MODEL`, `OLLAMA_DEEP_MODEL`, `OLLAMA_EMBED_MODEL`
+
+**Full change log:** See `UPGRADE_LOG` at repo root.
+
+**Implementation plan per tool:** See `PLAN_llm_tools_rewrite.md` at repo root.
+
+**Master plan (all 7 phases):** See `UPGRADE_PLAN.md` at repo root.
+
+**Ecosystem analysis + synergy map:** See `analysis.md` at repo root.
+
+---
+
+## Remaining Phases
+
+### Phase 2: Hybrid Search in rag_tools — NEXT UP
+
+**Goal:** Replace pure dense-vector search with BM25 + vector + RRF fusion.
+
+**Current state of `rag_tools/main.py`:**
+- Uses `SentenceTransformer("all-MiniLM-L6-v2")` for embeddings (lazy-loaded via `get_embed_model()`)
+- Stores vectors in `ChromaDB` at `<script_dir>/chroma_db/`
+- `_chunk_text()` helper does recursive character splitting (800 target, 100 overlap)
+- 12 tools: `get_doc_metadata`, `read_doc_content`, `list_document_images`, `extract_image_for_vision`, `index_document_for_search`, `semantic_search`, `list_indexed_collections`, `list_indexed_files`, `delete_from_index`, `chunk_and_preview`, `compare_documents`, `load_local_image`
+
+**What to implement:**
+
+1. **Add FTS5 index alongside ChromaDB**
+   - On `index_document_for_search`, also store chunks in SQLite with FTS5
+   - SQLite file: `<chroma_db_path>/rag_fts.db`
+   - Schema: `CREATE VIRTUAL TABLE chunks USING fts5(text, source, chunk_idx, collection)`
+
+2. **Implement BM25 search**
+   - New internal function: `_bm25_search(query, collection, limit)`
+   - Uses SQLite FTS5 `MATCH` with `bm25()` ranking
+
+3. **Implement RRF fusion**
+   - New internal function: `_rrf_fuse(bm25_results, vector_results, k=60)`
+   - Reciprocal Rank Fusion: `score = Σ 1/(k + rank_i)` across both result sets
+
+4. **Upgrade `semantic_search` tool**
+   - Add `search_mode` param: `"hybrid"` (default), `"vector"`, `"keyword"`
+   - Hybrid mode runs both, fuses via RRF, returns top results
+   - Add `rerank` param: when true, uses Ollama `ask_model` to rerank top results
+
+5. **Ollama-native embeddings**
+   - Add `_get_ollama_embedder()` as alternative to SentenceTransformers
+   - New env var: `RAG_EMBED_PROVIDER` = `"local"` (default) or `"ollama"`
+   - When `"ollama"`: calls `POST /api/embed` with `nomic-embed-text`
+   - Benefit: no need to load ~90MB SentenceTransformers model in-process
+
+**Tool changes:**
+| Tool | Change |
+|------|--------|
+| `index_document_for_search` | Also index into FTS5 SQLite |
+| `semantic_search` | Add `search_mode` and `rerank` params |
+| `list_indexed_collections` | Show both vector and FTS5 stats |
+| `delete_from_index` | Also delete from FTS5 |
+
+**Preserved capabilities:** ChromaDB stays, SentenceTransformers stays as default embedder, `_chunk_text` unchanged, all image/vision tools unchanged, `compare_documents` unchanged.
+
+**Test requirement:** Unit tests for BM25 search, RRF fusion, embed provider switching. Integration test comparing hybrid vs. vector-only. Regression: existing search must still work with `search_mode="vector"`.
+
+---
+
+### Phase 3: Knowledge Graph Memory
+
+**Goal:** Replace flat JSON memory (`memory_notes/main.py`, 161 lines, 4 tools) with entity-relation-observation graph backed by SQLite + FTS5.
+
+**Current state:** `memories.json` file with `remember`, `recall`, `list_memories`, `forget`. Substring-only search. No relations between memories.
+
+**What to implement:**
+- SQLite database: `entities`, `relations`, `observations`, `fts5_search` tables
+- 8 new tools: `create_entity`, `add_observation`, `create_relation`, `search_memory`, `get_entity`, `get_related`, `delete_entity`, `export_graph`
+- Auto-migration from `memories.json` on first run
+- Ollama integration: `search_memory` with semantic mode via embeddings, `summarize_entity`
+
+---
+
+### Phase 4: Code Intelligence Server (NEW)
+
+**Goal:** Tree-sitter-based code intelligence — call graphs, impact analysis, symbol search.
+
+**New server:** `code_intel/` with 9 tools. See `UPGRADE_PLAN.md` section 3.4 for full spec.
+
+---
+
+### Phase 5: Ollama-Enhanced Server Upgrades
+
+Add Ollama-aware capabilities to 5 existing servers:
+- `page_scrape`: `smart_extract`, `summarize_page`
+- `python_repl`: `execute_and_validate`, `fix_code`
+- `data_query`: `ask_database`, `schema_summary`
+- `local_searxng`: `deep_research`
+- `arch_system_tools`: `write_file`, `git_commit`
+
+---
+
+### Phase 6: FastMCP 3.x Feature Adoption
+
+Migrate all servers to use FastMCP 3.x features: `@mcp.tool(timeout=30)`, `await ctx.set_state()` / `await ctx.get_state()`, `Namespace` transforms, `ResourcesAsTools`, background tasks. See `UPGRADE_PLAN.md` section 3.6 for breaking changes and migration checklist.
+
+---
+
+### Phase 7: Agentic Orchestration
+
+New `orchestrator/` server using Ollama's native tool calling (`/api/chat` with tools) to let cloud models orchestrate multi-step, multi-server workflows.
+
+---
+
+## Key Files to Read
+
+| File | Purpose |
+|------|---------|
+| `UPGRADE_PLAN.md` | Master 7-phase plan with architecture, tool specs, dependency graph, risk mitigations |
+| `UPGRADE_LOG` | Change log for completed phases (currently Phase 1 only) |
+| `PLAN_llm_tools_rewrite.md` | Detailed implementation plan for Phase 1 (completed) |
+| `analysis.md` | Ecosystem comparison, benchmark insights, gap analysis |
+| `CLAUDE.md` | Project overview, server inventory, architecture notes |
+| `llm_tools/main.py` | The completed Phase 1 implementation (583 lines) |
+| `llm_tools/test_llm_tools.py` | 66 tests for llm_tools |
+| `rag_tools/main.py` | Next target for Phase 2 (785 lines, 12 tools) |
+
+## Important Context
+
+- **Ollama Max plan**: 10 concurrent cloud models, 250x GPU time, devstral-2/glm-5.1/deepseek-v4-pro for deep tier
+- **Local modelfiles**: 6 modelfiles in `ollama_modelfiles/` — 3 Qwen models share identical ChatML tool-calling templates with `/think`/`/no_think` reasoning support
+- **Test coverage gap**: Only 4/12 servers have tests. rag_tools, arch_system_tools, data_query, memory_notes, python_repl, local_searxng, code_check, current_date_time have zero tests
+- **Ollama API reference**: `/api/chat` (native tool calling), `/api/embed` (embeddings), `/api/tags` (model list), `/api/show` (model info) — all documented in Phase 1 implementation
+- **FastMCP version**: `rag_tools` uses `fastmcp>=3.2.0`; other servers use `mcp>=1.26.0` or `mcp>=1.27.0`
