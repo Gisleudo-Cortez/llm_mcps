@@ -348,17 +348,34 @@ Dependencies:
 
 ### Phase 6: FastMCP 3.x Feature Adoption
 
-**Goal**: Leverage FastMCP 3.x Providers, Transforms, Auth, and Session State.
+**Goal**: Migrate to PrefectHQ/fastmcp (formerly jlowin/fastmcp) and leverage Providers, Transforms, Auth, Session State, and CLI.
+
+**Key breaking changes from v2→v3** (must address before adopting new features):
+- `ctx.set_state()` / `ctx.get_state()` are now **async** — require `await`; tools using them must be `async def`
+- `get_tools()` renamed to `list_tools()` (returns list, not dict)
+- `@mcp.tool` now returns the original function, not a `FunctionTool` object
+- Constructor kwargs `host`, `port`, `log_level`, `debug` removed — pass to `run()` instead
+- `on_duplicate_tools`/`on_duplicate_resources`/`on_duplicate_prompts` replaced by single `on_duplicate=`
+- `WSTransport` removed; use `StreamableHttpTransport`
+- `tool_serializer` and `tool_transformations` removed; use `ToolTransform` and return `ToolResult`
+- Repo moved from `jlowin/fastmcp` to `PrefectHQ/fastmcp`
+- Background tasks require `pip install "fastmcp[tasks]"` (Docket dependency)
+- OAuth storage default changed from `DiskStore` to `FileTreeStore` (CVE-2025-69872)
 
 #### 3.6.1 Migration Checklist (All Servers)
 
 | Feature | Application | Servers |
 |---------|-------------|---------|
-| `@mcp.tool(timeout=30.0)` | Replace manual `subprocess.run(timeout=30)` | arch_system_tools, python_repl, code_check |
-| `ctx.set_state()` / `ctx.get_state()` | Replace module-level globals (`_client`, `_embed_model`) | llm_tools, rag_tools |
+| `@mcp.tool(timeout=30.0)` | Replace manual `subprocess.run(timeout=30)` — native MCP timeout with error code `-32000` | arch_system_tools, python_repl, code_check |
+| `await ctx.set_state()` / `await ctx.get_state()` | Replace module-level globals (`_client`, `_embed_model`) — session-scoped with 86400s TTL | llm_tools, rag_tools |
 | `Namespace` transform | Prefix tools when mounted behind gateway | All (when gateway is adopted) |
-| `ResourcesAsTools` | Expose ChromaDB collections as tools | rag_tools |
+| `ResourcesAsTools` | Expose ChromaDB collections as tools for tool-only clients | rag_tools |
 | `FastMCPProvider` | Mount memory_notes inside llm_tools for context injection | llm_tools, memory_notes |
+| `create_proxy()` | Proxy remote MCP servers (future: Playwright, GitHub) | orchestrator |
+| `FileSystemProvider` | Hot-reload tools from separate files | code_intel (new) |
+| `fastmcp list` / `fastmcp call` | CLI introspection and testing | All — replaces manual testing scripts |
+| `fastmcp discover` | Auto-discover servers from Claude Code, LM Studio configs | Deployment |
+| Background tasks (`task=True`) | Long-running indexing operations in rag_tools and code_intel | rag_tools, code_intel |
 
 #### 3.6.2 Auth (Selective)
 
@@ -367,6 +384,32 @@ Add `auth=require_scopes("admin")` to destructive tools:
 - `rag_tools/delete_from_index`
 - `python_repl/execute_python` (consider `sandbox` scope)
 - Future: `arch_system_tools/write_file`, `arch_system_tools/git_commit`
+
+Note: STDIO transport skips all auth checks, so this only applies when running behind the HTTP launcher or a gateway. Use `AuthMiddleware` with `restrict_tag("admin", scopes=["admin"])` for server-wide enforcement.
+
+#### 3.6.3 Session State Adoption
+
+Replace module-level globals with `await ctx.set_state()` / `await ctx.get_state()`:
+
+```python
+# Before (module-level global):
+_client = None
+def _get_client():
+    global _client
+    if _client is None:
+        _client = OpenAI(base_url=...)
+    return _client
+
+# After (session state):
+async def _get_client(ctx: Context):
+    client = await ctx.get_state("ollama_client")
+    if client is None:
+        client = OpenAI(base_url=...)
+        await ctx.set_state("ollama_client", client)
+    return client
+```
+
+Backends: `MemoryStore` (default, lost on restart) or `RedisStore` (persistent across restarts). For local-only deployment, `MemoryStore` is sufficient.
 
 ---
 
