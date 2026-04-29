@@ -1,12 +1,13 @@
 [project]
 name = "llm-tools"
 version = "0.1.0"
-description = "MCP server for delegating tasks to local LLMs via LM Studio's OpenAI-compatible API"
+description = "MCP server for delegating tasks to local LLMs via Ollama with tiered model routing"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "mcp>=1.27.0",
     "openai>=1.0.0",
+    "httpx>=0.28.0",
 ]
 
 [dependency-groups]
