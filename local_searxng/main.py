@@ -14,6 +14,20 @@ session.headers.update(
     }
 )
 
+_NOISY_URL_PATTERNS = (
+    # MDN Glossary pages are single-keyword stubs — same URL appears for any query
+    # containing that keyword (e.g., every Python query → /Glossary/Python)
+    "/docs/Glossary/",
+    # Docker Hub official images (hub.docker.com/_/name) are identical for every
+    # query about that technology regardless of the specific question
+    "hub.docker.com/_/",
+)
+
+
+def _is_quality_result(r: dict) -> bool:
+    url = r.get("url", "")
+    return not any(pattern in url for pattern in _NOISY_URL_PATTERNS)
+
 
 @mcp.tool()
 def web_search(
@@ -67,7 +81,7 @@ def web_search(
             )
 
         data = response.json()
-        results = data.get("results", [])
+        results = [r for r in data.get("results", []) if _is_quality_result(r)]
 
         if not results:
             return (

@@ -21,6 +21,7 @@ A collection of independent MCP (Model Context Protocol) servers built with [Fas
 | `command_docs/` | Command Docs | man pages, tldr cheat sheets, and cheat.sh community recipes |
 | `awesome_lists/` | Awesome Lists | Browse/search the sindresorhus/awesome meta-list (local repo) |
 | `llm_tools/` | LLM Tools | Delegate tasks (summarize, ask, code review, data interpretation) to local models via LM Studio API |
+| `code_check/` | Code Check Server | Format and lint generated code using the same tool chain as Neovim (ruff, prettier, stylua, shfmt, shellcheck, sqlfluff, …) |
 
 ## Commands
 
@@ -104,6 +105,16 @@ All subprocess calls go through `run_command()` which uses `subprocess.run` with
 ### Local SearXNG (`local_searxng/`)
 
 Requires a SearXNG instance running locally. URL defaults to `http://localhost:8080/search` and can be overridden with the `SEARXNG_URL` environment variable.
+
+### Code Check (`code_check/`)
+
+Formats and lints code snippets using the exact same binaries configured in the Neovim stack (conform.nvim + nvim-lint). All tools are expected to be on system PATH.
+
+- `format_code(code, language)` → runs the formatter, returns formatted code. In-place formatters (ruff, prettier, stylua, shfmt, etc.) write to a temp file then return the result.
+- `lint_code(code, language)` → runs the linter, returns issues or "No issues found.". JSON and TOML are validated via Python stdlib (no subprocess). Languages without a standalone linter (Go, Rust, C/C++, Java, Lua) return `[no linter]`.
+- `check_code(code, language)` → runs both in one call; returns a two-section report (`=== FORMAT ===` / `=== LINT ===`). Preferred over calling the two tools separately.
+- Language aliases accepted: `py`, `js`, `jsx`, `ts`, `tsx`, `sh`, `zsh`, `yml`, `md`, `cc`, `cxx`, `h`, `hpp`.
+- Formatter settings match nvim: stylua column-width 100 / 2-space, shfmt -i 2 -ci, sqlfluff dialect ansi.
 
 ### LLM Tools (`llm_tools/`)
 
