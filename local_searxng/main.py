@@ -18,6 +18,9 @@ _NOISY_URL_PATTERNS = (
     # MDN Glossary pages are single-keyword stubs — same URL appears for any query
     # containing that keyword (e.g., every Python query → /Glossary/Python)
     "/docs/Glossary/",
+    # MDN Web API reference pages match any word ending in "Report", "Event", etc.
+    # regardless of query intent — produces false positives for security/CVE queries
+    "developer.mozilla.org/en-US/docs/Web/API/",
     # Docker Hub official images (hub.docker.com/_/name) are identical for every
     # query about that technology regardless of the specific question
     "hub.docker.com/_/",
@@ -46,12 +49,36 @@ def web_search(
 
     **CONSTRAINT WARNING:** Avoid calling this on non-existent domains; ensure `SEARXNG_URL` points to a running instance at localhost:8080. The tool cannot bypass security restrictions or access restricted content. Results are limited to what SearXNG returns (typically 5 by default).
 
-    **OUTPUT EXPECTATION:** Returns formatted search results with title, source engine, URL, and snippet for each result, separated by "---". If no results found, returns error message with query details. If requests fail, returns specific error messages. This output is ideal for confirming data availability before proceeding to more complex operations.
+    **OUTPUT EXPECTATION:** Returns formatted search results with title, score, source engines, URL, and snippet for each result, separated by "---". Score reflects relevance (higher = better); engines shows how many independent sources agreed on the result — a low score with only one engine means low confidence. If no results found, returns error message with query details. If requests fail, returns specific error messages.
 
-    *Note:* The tool requires SearXNG running locally on port 8080. Network connectivity issues or service unavailability will return error messages.
+    **QUERY CONSTRUCTION — improve the query before calling:**
+
+    1. **Be specific.** Put the most distinctive terms first. Drop vague filler words
+       ("report", "info", "details", "how to") unless they are part of an exact title or phrase.
+
+    2. **Quote multi-word proper nouns and exact phrases.** `"Log4Shell"`, `"Arch Linux"`,
+       `"openai api"` — without quotes each word is searched independently and noise multiplies.
+
+    3. **Choose the right category for the domain:**
+       - News / current events / incidents / releases → `"news"` + `time_range`
+       - Security, CVEs, vulnerabilities, advisories → `"news,it"`
+       - Programming, APIs, libraries, docs → `"it"`
+       - Academic papers, research → `"science"`
+       - Anything else or unknown → `"general"`
+
+    4. **Always set `time_range` for time-sensitive queries.** Anything from a specific year
+       or recent period needs a range — leaving it blank gives all-time results where old pages
+       outrank new ones.
+
+    5. **Use `site:` to target authoritative sources** when you know where the answer lives:
+       `site:docs.python.org`, `site:nvd.nist.gov`, `site:github.com/advisories`.
+
+    6. **If results have low Score (< 0.5) or come from a single engine, the query failed.**
+       Do not present those results as facts. Reformulate: make the query more specific, switch
+       categories, split one broad query into two narrower ones, or add a `site:` constraint.
 
     Args:
-        query: The main search query.
+        query: The search query — apply QUERY CONSTRUCTION rules above before passing.
         num_results: How many results to return (3–10 recommended for token efficiency).
         categories: Comma-separated categories — 'general', 'news', 'science', 'it', 'social media'.
         time_range: Recency filter. Leave blank for all-time. Use 'day'/'week' for breaking news.
@@ -93,15 +120,21 @@ def web_search(
             title = r.get("title", "No Title")
             url = r.get("url", "No URL")
             content = r.get("content", "No content available")
+            score = r.get("score", None)
 
-            # engine can be a string or list depending on SearXNG version
-            engine = r.get("engine", "Unknown")
-            if isinstance(engine, list):
-                engine = ", ".join(engine)
+            # `engines` (plural list) shows multi-engine agreement — better signal than
+            # `engine` (singular legacy field). Fall back gracefully.
+            engines_raw = r.get("engines") or r.get("engine", "Unknown")
+            if isinstance(engines_raw, list):
+                engines_str = ", ".join(engines_raw)
+            else:
+                engines_str = engines_raw
+
+            score_str = f"{score:.2f}" if score is not None else "n/a"
 
             formatted_results.append(
                 f"**Title**: {title}\n"
-                f"**Source Engine**: {engine}\n"
+                f"**Score**: {score_str} | **Source Engines**: {engines_str}\n"
                 f"**URL**: {url}\n"
                 f"**Snippet**: {content}"
             )
