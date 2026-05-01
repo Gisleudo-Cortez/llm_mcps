@@ -3,7 +3,9 @@ import io
 import mimetypes
 import os
 import re
+import sqlite3
 from datetime import datetime
+from typing import Literal
 
 import numpy as np
 
@@ -23,6 +25,14 @@ md_converter = MarkItDown()
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
 chroma_client = PersistentClient(path=DB_PATH)
 
+# FTS5 keyword index alongside ChromaDB (same directory)
+FTS_DB_PATH = os.path.join(DB_PATH, "rag_fts.db")
+
+# Embedding provider: "local" (SentenceTransformers) or "ollama" (Ollama /api/embed)
+RAG_EMBED_PROVIDER = os.getenv("RAG_EMBED_PROVIDER", "local")
+RAG_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+RAG_OLLAMA_EMBED = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+
 # Lazy-Loaded Embedding Model (Prevents Timeout during MCP Handshake)
 _embed_model = None
 
@@ -36,6 +46,132 @@ def get_embed_model():
 
         _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _embed_model
+
+
+# --- Helper: Unified embedder (local or Ollama) ---
+
+_ollama_http = None
+
+
+def _get_ollama_http():
+    """Lazy httpx Client pointing to Ollama for embedding calls."""
+    global _ollama_http
+    if _ollama_http is None:
+        import httpx
+        _ollama_http = httpx.Client(base_url=RAG_OLLAMA_URL, timeout=60.0)
+    return _ollama_http
+
+
+def _embed(texts: list[str]) -> list:
+    """Embed a list of texts. Dispatches to Ollama or SentenceTransformers."""
+    if RAG_EMBED_PROVIDER == "ollama":
+        resp = _get_ollama_http().post(
+            "/api/embed",
+            json={"model": RAG_OLLAMA_EMBED, "input": texts},
+        )
+        resp.raise_for_status()
+        return resp.json()["embeddings"]
+    return get_embed_model().encode(texts).tolist()
+
+
+# --- Helper: FTS5 / BM25 infrastructure ---
+
+_fts_conn: sqlite3.Connection | None = None
+
+
+def _get_fts_conn() -> sqlite3.Connection:
+    """Return a module-level SQLite connection with FTS5 table initialized."""
+    global _fts_conn
+    if _fts_conn is None:
+        _fts_conn = sqlite3.connect(FTS_DB_PATH, check_same_thread=False)
+        _fts_conn.execute("PRAGMA journal_mode=WAL")
+        _fts_conn.execute("PRAGMA busy_timeout=5000")
+        _fts_conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
+                text,
+                source UNINDEXED,
+                chunk_idx UNINDEXED,
+                collection UNINDEXED
+            )
+            """
+        )
+        _fts_conn.commit()
+    return _fts_conn
+
+
+def _fts_index_chunks(chunks: list[str], source: str, collection: str) -> None:
+    """Insert text chunks into the FTS5 keyword index."""
+    conn = _get_fts_conn()
+    rows = [(c, source, i, collection) for i, c in enumerate(chunks)]
+    conn.executemany(
+        "INSERT INTO chunks(text, source, chunk_idx, collection) VALUES (?,?,?,?)", rows
+    )
+    conn.commit()
+
+
+def _fts_delete_source(source: str, collection: str) -> None:
+    """Remove all FTS5 chunks for a given source file and collection."""
+    conn = _get_fts_conn()
+    conn.execute(
+        "DELETE FROM chunks WHERE source=? AND collection=?", (source, collection)
+    )
+    conn.commit()
+
+
+def _bm25_search(query: str, collection: str, limit: int = 10) -> list[tuple]:
+    """
+    BM25 full-text search over FTS5 index, scoped to a collection.
+    Returns list of (rowid, text, source, chunk_idx, score). Returns [] on any error.
+    FTS5 bm25() returns negative values — ORDER BY ASC gives best (most negative) first.
+    """
+    try:
+        conn = _get_fts_conn()
+        rows = conn.execute(
+            """
+            SELECT rowid, text, source, chunk_idx, bm25(chunks) AS score
+            FROM chunks
+            WHERE chunks MATCH ? AND collection = ?
+            ORDER BY bm25(chunks)
+            LIMIT ?
+            """,
+            (query, collection, limit),
+        ).fetchall()
+        return list(rows)
+    except Exception:
+        return []
+
+
+def _rrf_fuse(
+    bm25_results: list[tuple],
+    vector_results: list[tuple],
+    k: int = 60,
+) -> list[tuple]:
+    """
+    Reciprocal Rank Fusion of BM25 and vector results.
+
+    bm25_results:   [(rowid, text, source, chunk_idx, score), ...]
+    vector_results: [(doc_id, text, source, chunk_idx, distance), ...]
+    Returns: [(text, source, chunk_idx, rrf_score), ...] sorted descending by RRF score.
+    k=60 is the empirical standard that prevents single-retriever dominance.
+    """
+    scores: dict = {}
+    payloads: dict = {}
+
+    for rank, row in enumerate(bm25_results, 1):
+        _, text, source, chunk_idx, _ = row
+        key = (source, int(chunk_idx))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+        payloads[key] = (text, source, chunk_idx)
+
+    for rank, row in enumerate(vector_results, 1):
+        _, text, source, chunk_idx, _ = row
+        key = (source, int(chunk_idx))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+        payloads[key] = (text, source, chunk_idx)
+
+    sorted_keys = sorted(scores, key=lambda kk: scores[kk], reverse=True)
+    return [(payloads[k][0], payloads[k][1], payloads[k][2], scores[k]) for k in sorted_keys]
 
 
 # --- Helper: Sentence-aware text chunker ---
@@ -348,11 +484,15 @@ def index_document_for_search(file_path: str, collection_name: str = "default") 
 
     ids = [f"{file_basename}_{i}" for i in range(len(chunks))]
     metadatas = [{"source": file_path, "chunk_index": i} for i in range(len(chunks))]
-    embeddings = get_embed_model().encode(chunks).tolist()
+    embeddings = _embed(chunks)
 
     collection.add(
         ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas
     )
+
+    # Mirror chunks into FTS5 for BM25 keyword search
+    _fts_delete_source(file_path, collection_name)
+    _fts_index_chunks(chunks, file_path, collection_name)
 
     preview = chunks[0][:200].replace("\n", " ")
     return (
@@ -368,75 +508,120 @@ def semantic_search(
     n_results: int = 3,
     source_filter: str = "",
     max_distance: float = 1.2,
+    search_mode: Literal["hybrid", "vector", "keyword"] = "hybrid",
 ) -> str:
     """
-    Search for concept-based information across indexed documents using semantic similarity.
+    Search indexed documents using hybrid BM25 + vector search (default) or either alone.
 
-    **TRIGGER CONDITION:** Use this when you have a QUESTION or CONCEPT to find but don't
-    know the exact wording in documents. Ideal for exploratory queries like "What are the
-    security recommendations?" rather than keyword searches.
+    **TRIGGER CONDITION:** Use this when you have a QUESTION or CONCEPT to find across
+    indexed documents. Hybrid mode (default) gives the best relevance by combining exact
+    keyword matches with semantic similarity via RRF fusion.
 
-    **SEQUENCE GUIDANCE:** ALWAYS call `index_document_for_search` first on target files—
-    searching unindexed collections returns no results. For focused searches, set `source_filter`
-    to a specific file path after reviewing indexed collections via `list_indexed_collections`.
+    **SEQUENCE GUIDANCE:** ALWAYS call `index_document_for_search` first on target files.
+    Choose `search_mode` based on your query type:
+    - "hybrid"  → BM25 + vector + RRF fusion (default, best for most queries)
+    - "vector"  → dense semantic similarity only (good for paraphrase/concept queries)
+    - "keyword" → BM25 full-text only (best for exact terms, IDs, or code snippets)
+    For focused searches, set `source_filter` to a specific file path.
 
-    **CONSTRAINT WARNING:** If results are irrelevant, try REPHRASING your query (semantic search
-    depends on natural language phrasing). Adjust `max_distance`: lower values (<0.8) for stricter
-    matching, higher values (>1.5) when no results appear. Default of 1.2 balances precision/recall—
-    don't change unless necessary.
+    **CONSTRAINT WARNING:** `max_distance` only applies to vector/hybrid modes. For
+    keyword mode, all BM25 matches are returned up to `n_results`. If results are
+    irrelevant in hybrid mode, try "vector" mode with a more natural-language query,
+    or "keyword" mode with specific technical terms.
 
-    **OUTPUT EXPECTATION:** Returns ranked list with relevance scores (lower = better), source
-    filenames, and chunk excerpts. Ideal for comparative analysis across documents, finding related
-    content, or answering conceptual questions without exact keyword matches.
+    **OUTPUT EXPECTATION:** Returns ranked list with scores and chunk excerpts.
+    Hybrid/keyword scores are RRF/BM25 values; vector scores are cosine distances
+    (lower = better). Ideal for RAG synthesis — pass results to llm_tools/ask_model.
 
-    *Error recovery:* No results? Try: 1) Verify indexing via `list_indexed_collections`, 2) Increase
-    `max_distance`, 3) Rephrase query more naturally, 4) Check source_filter isn't too restrictive.
+    *Error recovery:* No results? 1) Verify indexing via `list_indexed_collections`,
+    2) Try a different search_mode, 3) Rephrase query, 4) Check source_filter.
     """
+    if not query.strip():
+        return "Error: query cannot be empty."
+
+    # ---- keyword-only mode (BM25) ----
+    if search_mode == "keyword":
+        bm25 = _bm25_search(query, collection_name, limit=n_results * 2)
+        if source_filter:
+            bm25 = [r for r in bm25 if source_filter in r[2]]
+        if not bm25:
+            return (
+                f"No keyword results for '{query}' in '{collection_name}'. "
+                "Verify indexing or try search_mode='vector'."
+            )
+        lines = [f"### Keyword search (BM25) for: '{query}'\n"]
+        for i, (_rid, text, source, chunk_idx, score) in enumerate(bm25[:n_results], 1):
+            lines.append(
+                f"**Result {i}** | Source: `{os.path.basename(source)}` "
+                f"| Chunk: {chunk_idx} | BM25: {score:.4f}\n\n{text}\n"
+            )
+        return "\n---\n".join(lines)
+
+    # ---- vector search (shared by "vector" and "hybrid") ----
+    vector_results = []
     try:
         collection = chroma_client.get_collection(name=collection_name)
-        query_embedding = get_embed_model().encode([query]).tolist()
-
+        query_embedding = _embed([query])
         where_clause = {"source": source_filter} if source_filter else None
-
-        results = collection.query(
+        fetch_n = n_results if search_mode == "vector" else n_results * 2
+        raw = collection.query(
             query_embeddings=query_embedding,
-            n_results=n_results,
+            n_results=fetch_n,
             where=where_clause,
             include=["documents", "metadatas", "distances"],
         )
+        docs = raw["documents"][0]
+        metas = raw["metadatas"][0]
+        distances = raw["distances"][0]
+        vector_results = [
+            (i, d, m.get("source", ""), m.get("chunk_index", 0), dist)
+            for i, (d, m, dist) in enumerate(zip(docs, metas, distances))
+        ]
+    except Exception as e:
+        if search_mode == "vector":
+            return f"Error searching vector DB: {e}. Ensure documents are indexed first."
+        # hybrid: continue with empty vector results, BM25 alone
 
-        docs = results["documents"][0]
-        metas = results["metadatas"][0]
-        distances = results["distances"][0]
-
-        if not docs:
+    # ---- vector-only output ----
+    if search_mode == "vector":
+        if not vector_results:
             return "No results found. Ensure documents are indexed first."
-
-        formatted = [f"### Semantic search results for: '{query}'\n"]
+        lines = [f"### Semantic search results for: '{query}'\n"]
         returned = 0
-        for i, (doc, meta, dist) in enumerate(zip(docs, metas, distances)):
+        for _, doc, source, chunk_idx, dist in vector_results:
             if dist > max_distance:
-                continue  # Skip low-quality matches
+                continue
             returned += 1
-            source = os.path.basename(meta.get("source", "unknown"))
-            chunk_idx = meta.get("chunk_index", "?")
-            formatted.append(
-                f"**Result {returned}** | Source: `{source}` | Chunk: {chunk_idx} "
-                f"| Relevance score: {dist:.4f} (lower = better)\n\n{doc}\n"
+            lines.append(
+                f"**Result {returned}** | Source: `{os.path.basename(source)}` "
+                f"| Chunk: {chunk_idx} | Score: {dist:.4f} (lower = better)\n\n{doc}\n"
             )
-
         if returned == 0:
             return (
                 f"No results met the quality threshold (max_distance={max_distance}). "
-                f"Try increasing max_distance or re-phrasing the query."
+                "Try increasing max_distance or re-phrasing the query."
             )
+        return "\n---\n".join(lines)
 
-        return "\n---\n".join(formatted)
+    # ---- hybrid: BM25 + vector + RRF ----
+    bm25_results = _bm25_search(query, collection_name, limit=n_results * 2)
+    if source_filter:
+        bm25_results = [r for r in bm25_results if source_filter in r[2]]
+        vector_results = [r for r in vector_results if source_filter in r[2]]
 
-    except Exception as e:
+    fused = _rrf_fuse(bm25_results, vector_results)
+    if not fused:
         return (
-            f"Error searching vector DB: {str(e)}. Ensure documents are indexed first."
+            f"No hybrid results for '{query}' in '{collection_name}'. "
+            "Ensure documents are indexed first."
         )
+    lines = [f"### Hybrid search results for: '{query}'\n"]
+    for i, (text, source, chunk_idx, rrf_score) in enumerate(fused[:n_results], 1):
+        lines.append(
+            f"**Result {i}** | Source: `{os.path.basename(source)}` "
+            f"| Chunk: {chunk_idx} | RRF score: {rrf_score:.6f}\n\n{text}\n"
+        )
+    return "\n---\n".join(lines)
 
 
 @mcp.tool()
@@ -468,7 +653,14 @@ def list_indexed_collections() -> str:
         for col in collections:
             c = chroma_client.get_collection(col.name)
             count = c.count()
-            lines.append(f"- **{col.name}**: {count} chunks indexed")
+            try:
+                fts_count = _get_fts_conn().execute(
+                    "SELECT COUNT(*) FROM chunks WHERE collection=?", (col.name,)
+                ).fetchone()[0]
+                fts_str = f", {fts_count} keyword chunks"
+            except Exception:
+                fts_str = ""
+            lines.append(f"- **{col.name}**: {count} vector chunks{fts_str}")
 
         return "\n".join(lines)
 
@@ -538,6 +730,14 @@ def delete_from_index(
     try:
         if delete_collection:
             chroma_client.delete_collection(name=collection_name)
+            # Remove all FTS5 entries for this collection
+            try:
+                _get_fts_conn().execute(
+                    "DELETE FROM chunks WHERE collection=?", (collection_name,)
+                )
+                _get_fts_conn().commit()
+            except Exception:
+                pass
             return f"Collection '{collection_name}' deleted successfully."
 
         if not file_path:
@@ -550,6 +750,7 @@ def delete_from_index(
             return f"No indexed chunks found for '{file_path}' in '{collection_name}'."
 
         collection.delete(ids=existing["ids"])
+        _fts_delete_source(file_path, collection_name)
         return (
             f"Removed {len(existing['ids'])} chunks for '{os.path.basename(file_path)}' "
             f"from '{collection_name}'."
