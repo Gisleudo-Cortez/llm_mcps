@@ -5,15 +5,15 @@ Primary backend: Ollama (localhost:11434) with tiered model routing.
 Also compatible with any OpenAI-compatible API via OLLAMA_URL/v1.
 
 Model tiers:
-  fast     → small local models (nemotron-4b, gemma4-4b) for quick tasks
-  standard → local reasoning models (qwen3.5-9b, qwen3.6-27b)
-  deep     → cloud models (devstral-2, glm-5.1) for complex tasks
+  fast     → small local models (qwen3:4b ~3GB) for quick tasks, sub-second
+  standard → local reasoning models (qwen3:14b ~9GB) for code, analysis, Q&A
+  deep     → cloud models (deepseek-v4-pro:cloud, glm-5.1:cloud) for complex tasks
 
 Env vars:
   OLLAMA_URL            → default http://localhost:11434
-  OLLAMA_FAST_MODEL     → default nemotron-3-nano-4b
-  OLLAMA_STANDARD_MODEL → default qwen3.5:9b
-  OLLAMA_DEEP_MODEL     → default devstral-2
+  OLLAMA_FAST_MODEL     → default qwen3:4b
+  OLLAMA_STANDARD_MODEL → default qwen3:14b
+  OLLAMA_DEEP_MODEL     → default deepseek-v4-pro:cloud
   OLLAMA_EMBED_MODEL    → default nomic-embed-text
   LM_STUDIO_URL         → legacy alias for OLLAMA_URL (backward compat)
   LLM_TOOLS_DEFAULT_MODEL → override all tier resolution
@@ -37,9 +37,9 @@ OLLAMA_URL = os.getenv(
     os.getenv("LM_STUDIO_URL", "http://localhost:11434"),
 )
 
-OLLAMA_FAST_MODEL = os.getenv("OLLAMA_FAST_MODEL", "nemotron-3-nano-4b")
-OLLAMA_STANDARD_MODEL = os.getenv("OLLAMA_STANDARD_MODEL", "qwen3.5:9b")
-OLLAMA_DEEP_MODEL = os.getenv("OLLAMA_DEEP_MODEL", "devstral-2")
+OLLAMA_FAST_MODEL = os.getenv("OLLAMA_FAST_MODEL", "qwen3:4b")
+OLLAMA_STANDARD_MODEL = os.getenv("OLLAMA_STANDARD_MODEL", "qwen3:14b")
+OLLAMA_DEEP_MODEL = os.getenv("OLLAMA_DEEP_MODEL", "deepseek-v4-pro:cloud")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 # Input char limits — larger for cloud models with big context windows
@@ -140,8 +140,11 @@ _Tier = Literal["fast", "standard", "deep", "auto"]
 
 
 def _is_cloud_model(model: str) -> bool:
-    """Heuristic: models known to be cloud-hosted via Ollama Max."""
-    cloud_prefixes = ("devstral", "deepseek", "glm-", "gemini-3", "qwen3-coder")
+    """Detect Ollama Max cloud-hosted models. Cloud models use the ':cloud' tag."""
+    if model.lower().endswith(":cloud"):
+        return True
+    # Fallback: bare names for known cloud-only model families (no local GGUF versions)
+    cloud_prefixes = ("devstral", "deepseek-v4", "gemini-3")
     return any(model.lower().startswith(p) for p in cloud_prefixes)
 
 
@@ -176,6 +179,29 @@ def _resolve_model(tier: _Tier = "auto", model: str = "") -> str:
     return tier_map.get(tier, OLLAMA_STANDARD_MODEL)
 
 
+def _resolve_model_with_fallback(tier: _Tier = "auto", model: str = "") -> str:
+    """
+    Like _resolve_model but checks live Ollama availability and falls back if needed.
+
+    Fallback chain: requested → deep → standard → fast → first available model.
+    Cloud models (:cloud suffix) bypass the local availability check.
+    Used at call time in _call() and _call_native() for runtime resilience.
+    """
+    requested = _resolve_model(tier, model)
+    if _is_cloud_model(requested):
+        return requested
+
+    available = _get_available_model_names()
+    if not available or requested in available:
+        return requested
+
+    for candidate in (OLLAMA_DEEP_MODEL, OLLAMA_STANDARD_MODEL, OLLAMA_FAST_MODEL):
+        if candidate and (_is_cloud_model(candidate) or candidate in available):
+            return candidate
+
+    return available[0] if available else requested
+
+
 def _ollama_list_models() -> list[dict]:
     """Fetch model list from Ollama's /api/tags endpoint."""
     try:
@@ -196,13 +222,30 @@ def _ollama_model_info(model_name: str) -> dict | None:
         return None
 
 
+_model_name_cache: list[str] | None = None
+
+
+def _get_available_model_names() -> list[str]:
+    """Cached list of model names from Ollama /api/tags. Populated on first call."""
+    global _model_name_cache
+    if _model_name_cache is None:
+        models = _ollama_list_models()
+        _model_name_cache = [m.get("name", "") for m in models] if models else []
+    return _model_name_cache
+
+
 def _infer_tier(model_name: str) -> str:
     """Infer a tier label from the model name for display purposes."""
     name = model_name.lower()
-    if any(p in name for p in ("nano", "4b", "3b", "1b", "0.5b", "gemma4-e", "gemma-4")):
-        if "27b" not in name and "9b" not in name:
+    # Cloud: Ollama Max models always carry :cloud tag
+    if name.endswith(":cloud"):
+        return "deep"
+    # Fast: small models (sub-5B) — exclude larger models that happen to contain "4b" as substring
+    if any(p in name for p in ("nano", "mini", ":4b", ":3b", ":2b", ":1b", ":0.5b", "-4b", "-3b")):
+        if "14b" not in name and "27b" not in name and "34b" not in name:
             return "fast"
-    if any(p in name for p in ("devstral", "deepseek-v4", "glm-5", "gemini-3-flash")):
+    # Legacy deep markers (non-cloud bare names)
+    if any(p in name for p in ("devstral", "deepseek-v4", "gemini-3")):
         return "deep"
     return "standard"
 
@@ -220,7 +263,7 @@ def _call(
     max_tokens: int = 800,
 ) -> str:
     """Execute one chat completion via Ollama's OpenAI-compatible endpoint and return the text."""
-    resolved = _resolve_model(tier, model)
+    resolved = _resolve_model_with_fallback(tier, model)
     try:
         resp = _get_client().chat.completions.create(
             model=resolved,
@@ -255,7 +298,7 @@ def _call_native(
     think: bool = False,
 ) -> dict:
     """Execute a chat completion via Ollama's native /api/chat endpoint."""
-    resolved = _resolve_model(tier, model)
+    resolved = _resolve_model_with_fallback(tier, model)
     payload: dict = {
         "model": resolved,
         "messages": messages,
@@ -801,8 +844,11 @@ def agent_chat(
     a JSON array in `tools` — each tool should have `name`, `description`, and `parameters`
     (JSON Schema). The model will decide which tools to call at each step.
 
-    **MODEL TIER:** Defaults to "deep" (cloud devstral-2). Only deep-tier models reliably
-    support tool calling. Do NOT use fast or standard tier for agent tasks.
+    **MODEL TIER:** Defaults to "deep" (cloud deepseek-v4-pro). Local qwen3:14b and qwen3:4b
+    also support tool calling via Ollama's native `/api/chat`. Use `tier="standard"` for
+    offline use. Known caveat: qwen3:14b may fall back to plaintext `<tool_call>` tags
+    instead of structured JSON when context history grows large — keep max_steps ≤ 5 or
+    use the cloud tier for long sessions.
 
     **CONSTRAINT WARNING:** Each step counts toward `max_steps` (default 5). The loop stops
     when the model produces a final text response without tool calls, or max_steps is reached.

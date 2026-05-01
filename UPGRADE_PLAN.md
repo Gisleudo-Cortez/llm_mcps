@@ -158,6 +158,8 @@ Architecture:
 
 #### 3.1.3 Update MCP Config
 
+**Actual config applied (2026-05-01)** — `~/.lmstudio/mcp.json`:
+
 ```json
 {
   "llm-tools": {
@@ -165,14 +167,25 @@ Architecture:
     "args": [".../llm_tools/main.py"],
     "env": {
       "OLLAMA_URL": "http://localhost:11434",
-      "OLLAMA_FAST_MODEL": "nemotron-3-nano-4b",
-      "OLLAMA_STANDARD_MODEL": "qwen3.5:9b",
-      "OLLAMA_DEEP_MODEL": "devstral-2",
+      "OLLAMA_FAST_MODEL": "qwen3:4b",
+      "OLLAMA_STANDARD_MODEL": "qwen3:14b",
+      "OLLAMA_DEEP_MODEL": "deepseek-v4-pro:cloud",
       "OLLAMA_EMBED_MODEL": "nomic-embed-text"
     }
   }
 }
 ```
+
+**Model rationale (RTX 4080 Laptop, 12GB VRAM):**
+
+| Model | Size | VRAM fit | Role |
+|-------|------|----------|------|
+| `qwen3:4b` | ~3GB | ✅ full GPU | fast tier — tool calling, quick tasks |
+| `qwen3:14b` | ~9GB | ✅ full GPU | standard tier — reasoning, code review, Q&A |
+| `deepseek-v4-pro:cloud` | cloud | ☁️ Ollama Max | deep tier — complex synthesis, multi-step |
+| `nomic-embed-text` | 274MB | ✅ full GPU | embeddings — RAG, semantic memory |
+| `glm-4.7-flash:latest` | 19GB | ⚠️ partial | backup standard (CPU spillover ~7GB) |
+| `gemma4:latest` | 9.6GB | ✅ full GPU | backup fast/standard |
 
 #### 3.1.4 Upgrade `llm_tools/pyproject.toml`
 
@@ -594,31 +607,51 @@ Each phase is a separate commit (or set of commits) on this branch. Merge to mai
 | Knowledge graph migration loses data | `memories.json` kept as read-only backup; migration is additive |
 | Hybrid search slower than vector-only | FTS5 is very fast; RRF adds negligible overhead; provide `search_mode="vector"` escape hatch |
 | Tree-sitter language gaps | Start with Python, JS/TS, Go, Rust (mature bindings); add languages incrementally |
-| Tool calling reliability | Use Ollama native `/api/chat` for tool calls (not OpenAI-compatible); validate tool call JSON before execution |
+| Tool calling reliability | Use Ollama native `/api/chat`; validate tool call JSON before execution; qwen3:14b may fall back to plaintext tags on long contexts — use `max_steps ≤ 5` or cloud tier for long sessions |
 | Breaking existing workflows | Phase 1 preserves all 5 current llm_tools tools with backward-compatible signatures; new params have defaults |
+| Model not installed (tier routing breaks) | `_resolve_model()` fallback chain: requested → deep → standard → fast → first available; never raises, lets Ollama produce a clear error if all fail |
+| Wrong input limit applied to local model | `_is_cloud_model()` now uses `:cloud` tag suffix (not name prefix); fixes glm-4.7-flash wrongly getting 50k limit |
+| VRAM exhaustion with large local models | qwen3:14b (~9GB) fits in 12GB VRAM; glm-4.7-flash (19GB) and qwen3.6 (23GB) spill to CPU RAM — only use as explicit fallback, not defaults |
+| Embedding model absent | Phase 2 (rag_tools) gates Ollama embed path on `RAG_EMBED_PROVIDER=ollama`; defaults to SentenceTransformers so existing RAG still works if nomic-embed-text is not pulled |
 
 ---
 
 ## 8. Model Routing Strategy
 
+Hardware baseline: RTX 4080 Laptop — 12GB VRAM.
+
 ```
 Task Complexity Assessment (in llm_tools):
-┌────────────────────────────────────────────────────────┐
-│ Input chars < 500 AND simple task (summarize, format)? │
-│   → tier="fast"  (nemotron-4b, local)                  │
-├────────────────────────────────────────────────────────┤
-│ Input chars < 5000 OR reasoning/coding task?           │
-│   → tier="standard" (qwen3.5-9b or qwen3.6-27b, local)│
-├────────────────────────────────────────────────────────┤
-│ Multi-source synthesis, complex code gen, or agent?    │
-│   → tier="deep" (devstral-2 or glm-5.1, cloud)         │
-├────────────────────────────────────────────────────────┤
-│ Vision task (images, screenshots, diagrams)?            │
-│   → vision model (qwen3.5-vision or kimi-k2.6)        │
-└────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│ Input chars < 500 AND simple task (summarize, format)?     │
+│   → tier="fast"  → qwen3:4b  (~3GB, full VRAM, ~30 t/s)   │
+├────────────────────────────────────────────────────────────┤
+│ Input chars < 5000 OR reasoning / coding / Q&A task?       │
+│   → tier="standard" → qwen3:14b  (~9GB, full VRAM)        │
+├────────────────────────────────────────────────────────────┤
+│ Multi-source synthesis, complex code gen, or agent loop?   │
+│   → tier="deep" → deepseek-v4-pro:cloud  (Ollama Max)      │
+│   Alternates: glm-5.1:cloud, kimi-k2.6:cloud               │
+├────────────────────────────────────────────────────────────┤
+│ Vision task (images, screenshots, diagrams)?               │
+│   → kimi-k2.6:cloud (multimodal) or gemma4:latest locally  │
+├────────────────────────────────────────────────────────────┤
+│ Embedding (RAG indexing, semantic memory)?                  │
+│   → nomic-embed-text (274MB, 768-dim, fast)                │
+│   High-quality alt: mxbai-embed-large (1024-dim)           │
+│   Best: qwen3-embedding:0.6b (MTEB #1, multilingual)       │
+└────────────────────────────────────────────────────────────┘
 ```
 
+Fallback chain in `_resolve_model()` (automatic, no config needed):
+  Requested model not in Ollama → try deep → try standard → try fast → first available
+
 User can override with explicit `model` or `tier` parameter on any call.
+
+Local backup models (not defaults — CPU spillover):
+  glm-4.7-flash:latest  (19GB → ~12GB GPU + 7GB RAM)
+  qwen3.6:latest        (23GB → ~12GB GPU + 11GB RAM)
+  gemma4:latest         (9.6GB → full VRAM, good for multimodal if qwen unavailable)
 
 ---
 

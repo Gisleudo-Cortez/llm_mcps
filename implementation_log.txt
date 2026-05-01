@@ -1,0 +1,126 @@
+# Implementation Log — Ollama Max Evolution
+# Branch: upgrade/ollama-max-evolution
+# Started: 2026-05-01
+
+================================================================================
+## SESSION: 2026-05-01
+================================================================================
+
+--------------------------------------------------------------------------------
+### COMPLETED (prior session — commit 71c0de2)
+--------------------------------------------------------------------------------
+PHASE 1: llm_tools full rewrite
+- Dual-client architecture: OpenAI-compat (/v1) + httpx native (/api/chat, /api/embed)
+- Tier-based model routing: fast / standard / deep / auto
+- 5 modified tools: list_available_models, summarize, ask_model, analyze_code, interpret_data
+- 4 new tools: embed_text, model_info, generate_code, agent_chat
+- 5 new env vars: OLLAMA_URL, OLLAMA_FAST_MODEL, OLLAMA_STANDARD_MODEL, OLLAMA_DEEP_MODEL, OLLAMA_EMBED_MODEL
+- Test suite expanded 22 → 66 tests, all passing
+- pyproject.toml updated: added httpx>=0.28.0
+
+--------------------------------------------------------------------------------
+### CURRENT SESSION AUDIT (2026-05-01)
+--------------------------------------------------------------------------------
+GPU inventory:
+  - RTX 4080 Laptop | 12GB VRAM (12282 MiB) | 125 MiB used at session start
+
+Installed Ollama models at session start:
+  - gemma4:latest          9.6 GB  → fits in VRAM (full GPU)
+  - glm-4.7-flash:latest  19 GB   → partial GPU (~12GB) + CPU RAM (~7GB)
+  - qwen3.6:latest        23 GB   → partial GPU (~12GB) + CPU RAM (~11GB)
+  - deepseek-v4-flash:cloud   —   → Ollama Max cloud
+  - kimi-k2.6:cloud           —   → Ollama Max cloud
+  - deepseek-v4-pro:cloud     —   → Ollama Max cloud
+  - glm-5.1:cloud             —   → Ollama Max cloud
+
+Models being pulled (user-initiated, separate terminal):
+  ollama pull nomic-embed-text   (~274MB) → fills embedding gap
+  ollama pull qwen3:4b           (~3GB)   → true fast tier, native tool calling
+  ollama pull qwen3:14b          (~9GB)   → standard tier, fits in VRAM
+  ollama pull mxbai-embed-large  (~2GB)   → higher-quality embeddings (optional)
+
+Bugs found in llm_tools/main.py:
+  BUG-1: Default models reference non-existent models
+         OLLAMA_FAST_MODEL     = "nemotron-3-nano-4b"  (not installed)
+         OLLAMA_STANDARD_MODEL = "qwen3.5:9b"           (not installed)
+         OLLAMA_DEEP_MODEL     = "devstral-2"            (not installed)
+  BUG-2: _is_cloud_model() uses name-prefix heuristics
+         glm-4.7-flash:latest (LOCAL) matches prefix "glm-" → wrongly gets 50k char limit
+         kimi-k2.6:cloud (CLOUD) matches no prefix → wrongly gets 12k char limit
+  BUG-3: _infer_tier() misses gemma4:latest, qwen3:4b → shows "standard" instead of correct tier
+  BUG-4: MCP config llm-tools still has LM_STUDIO_URL=http://localhost:1234/v1 (LM Studio)
+         → Ollama never gets used; all traffic goes to LM Studio port
+  BUG-5: No model existence check or fallback chain
+         → "model not found" errors mid-workflow with no graceful recovery
+
+--------------------------------------------------------------------------------
+### STEP 1 — Fix llm_tools/main.py [IN PROGRESS]
+--------------------------------------------------------------------------------
+Changes:
+  [x] Update default model constants to installed/incoming models:
+      OLLAMA_FAST_MODEL     → "qwen3:4b"
+      OLLAMA_STANDARD_MODEL → "qwen3:14b"
+      OLLAMA_DEEP_MODEL     → "deepseek-v4-pro:cloud"
+      OLLAMA_EMBED_MODEL    → "nomic-embed-text"
+  [x] Fix _is_cloud_model(): use ":cloud" suffix instead of name prefixes
+  [x] Fix _infer_tier(): add qwen3:4b (fast), cloud suffix detection
+  [x] Add _get_available_model_names() cached helper
+  [x] Update _resolve_model() with fallback chain:
+      requested tier → deep → standard → fast → first available
+  [x] Update module docstring with correct tier examples
+  [ ] Run test suite (66 tests must pass)
+
+--------------------------------------------------------------------------------
+### STEP 2 — Update MCP config (~/.lmstudio/mcp.json) [PENDING]
+--------------------------------------------------------------------------------
+  Replace llm-tools env block:
+    FROM: { "LM_STUDIO_URL": "http://localhost:1234/v1" }
+    TO:   {
+            "OLLAMA_URL": "http://localhost:11434",
+            "OLLAMA_FAST_MODEL": "qwen3:4b",
+            "OLLAMA_STANDARD_MODEL": "qwen3:14b",
+            "OLLAMA_DEEP_MODEL": "deepseek-v4-pro:cloud",
+            "OLLAMA_EMBED_MODEL": "nomic-embed-text"
+          }
+
+--------------------------------------------------------------------------------
+### STEP 3 — Update plan documents [PENDING]
+--------------------------------------------------------------------------------
+  Files: UPGRADE_PLAN.md, NEXT_STEP
+  - Update section 3.1.3 MCP Config with correct env vars
+  - Update section 7 Risk Mitigations (add VRAM + model-existence rows)
+  - Update section 8 Model Routing Strategy with actual installed models
+  - Update NEXT_STEP hardware/model inventory
+
+--------------------------------------------------------------------------------
+### STEP 4 — Git commit [PENDING]
+--------------------------------------------------------------------------------
+
+================================================================================
+### NEXT PHASES (from UPGRADE_PLAN.md)
+================================================================================
+Phase 2: Hybrid search in rag_tools
+  - FTS5 index alongside ChromaDB
+  - BM25 search + RRF fusion
+  - Ollama embeddings as alternative to SentenceTransformers
+  - search_mode param: "hybrid" (default) / "vector" / "keyword"
+
+Phase 3: Knowledge graph memory (memory_notes rewrite)
+  - SQLite entities / relations / observations + FTS5
+  - Auto-migrate from memories.json
+  - Ollama semantic search over memories
+
+Phase 4: Code intelligence server (new)
+  - Tree-sitter parsing, call graphs, symbol search
+  - Languages: Python, JS/TS, Go, Rust
+
+Phase 5: Ollama-enhanced server upgrades
+  - page_scrape: smart_extract, summarize_page
+  - python_repl: execute_and_validate, fix_code
+  - data_query: ask_database, schema_summary
+  - local_searxng: deep_research
+  - arch_system_tools: write_file, git_commit
+
+Phase 6: FastMCP 3.x migration
+Phase 7: Agentic orchestrator server
+================================================================================

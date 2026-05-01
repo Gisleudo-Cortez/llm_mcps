@@ -152,8 +152,14 @@ New `orchestrator/` server using Ollama's native tool calling (`/api/chat` with 
 
 ## Important Context
 
-- **Ollama Max plan**: 10 concurrent cloud models, 250x GPU time, devstral-2/glm-5.1/deepseek-v4-pro for deep tier
+- **Ollama Max plan**: 10 concurrent cloud models, 250x GPU time — deepseek-v4-pro:cloud, glm-5.1:cloud, kimi-k2.6:cloud, deepseek-v4-flash:cloud are all active
+- **GPU**: RTX 4080 Laptop, 12GB VRAM. VRAM-safe locals: qwen3:4b (~3GB), qwen3:14b (~9GB), nomic-embed-text (274MB), gemma4:latest (9.6GB). CPU-spillover locals: glm-4.7-flash (19GB), qwen3.6 (23GB)
+- **Active tier defaults** (2026-05-01, in MCP config and code):
+  - fast=`qwen3:4b`, standard=`qwen3:14b`, deep=`deepseek-v4-pro:cloud`, embed=`nomic-embed-text`
+- **Tool calling**: qwen3:4b and qwen3:14b both support Ollama native tool calling. Caveat: qwen3:14b may fall back to plaintext `<tool_call>` tags when context history grows — keep `max_steps ≤ 5` in agent_chat or use cloud tier for long sessions
+- **Embedding options** (best → good): `qwen3-embedding:0.6b` (MTEB #1, 70.58 score, should pull) → `mxbai-embed-large` (1024-dim, 64.68) → `nomic-embed-text` (768-dim, 62.39). Currently only nomic is in MCP config default
 - **Local modelfiles**: 6 modelfiles in `ollama_modelfiles/` — 3 Qwen models share identical ChatML tool-calling templates with `/think`/`/no_think` reasoning support
 - **Test coverage gap**: Only 4/12 servers have tests. rag_tools, arch_system_tools, data_query, memory_notes, python_repl, local_searxng, code_check, current_date_time have zero tests
 - **Ollama API reference**: `/api/chat` (native tool calling), `/api/embed` (embeddings), `/api/tags` (model list), `/api/show` (model info) — all documented in Phase 1 implementation
 - **FastMCP version**: `rag_tools` uses `fastmcp>=3.2.0`; other servers use `mcp>=1.26.0` or `mcp>=1.27.0`
+- **Future embedding upgrade**: consider pulling `qwen3-embedding:0.6b` — significantly better than nomic, only ~600MB
