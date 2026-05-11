@@ -25,6 +25,7 @@ SERVERS = [
     ("awesome_lists",     8209),
     ("llm_tools",         8210),
     ("code_check",        8211),
+    ("wireshark_mcp",     8212),
 ]
 
 procs: list[subprocess.Popen] = []

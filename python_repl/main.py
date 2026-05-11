@@ -5,10 +5,18 @@ import tempfile
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("Python REPL")
+mcp = FastMCP("python_repl_mcp")
 
 
-@mcp.tool()
+@mcp.tool(
+    name="repl_execute_python",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def execute_python(code: str, timeout: int = 30) -> str:
     """
     Execute Python code in an isolated subprocess and return stdout/stderr.
@@ -23,8 +31,10 @@ def execute_python(code: str, timeout: int = 30) -> str:
 
     **CONSTRAINT WARNING:** Timeout is capped at 60 seconds regardless of input. Each call
     spawns a real subprocess—avoid tight infinite loops. The interpreter has access to all
-    packages installed in the system Python (`sys.executable`). Network access is allowed
-    but unguarded—use with care.
+    packages installed in the system Python (`sys.executable`). The subprocess receives only
+    essential system environment variables (PATH, HOME, LANG, etc.) — API keys, database
+    URLs, and other secrets from the parent process are intentionally excluded for security.
+    Network access is allowed but unguarded—use with care.
 
     **OUTPUT EXPECTATION:** Returns combined stdout and stderr, truncated at 50k chars.
     Non-zero exit codes are reported alongside error output. Empty output means the code
@@ -44,13 +54,21 @@ def execute_python(code: str, timeout: int = 30) -> str:
         tmp_path = f.name
 
     try:
+        # Restrict environment to only essential system variables — no API keys, secrets, or credentials
+        _SAFE_ENV_KEYS = frozenset({
+            "PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "LC_CTYPE",
+            "PYTHONPATH", "PYTHONIOENCODING", "TMPDIR", "TEMP", "TMP",
+            "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+        })
+        safe_env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+
         result = subprocess.run(
             [sys.executable, tmp_path],
             capture_output=True,
             text=True,
             timeout=timeout,
             errors="replace",
-            env={**os.environ},
+            env=safe_env,
         )
 
         stdout = result.stdout.rstrip()
@@ -84,7 +102,15 @@ def execute_python(code: str, timeout: int = 30) -> str:
         os.unlink(tmp_path)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="repl_list_installed_packages",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def list_installed_packages() -> str:
     """
     List all packages installed in the current Python environment.

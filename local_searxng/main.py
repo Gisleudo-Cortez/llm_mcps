@@ -4,7 +4,7 @@ from typing import Literal
 import requests
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("SearXNG Search Server")
+mcp = FastMCP("searxng_mcp")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://localhost:8080/search")
 
 session = requests.Session()
@@ -32,7 +32,15 @@ def _is_quality_result(r: dict) -> bool:
     return not any(pattern in url for pattern in _NOISY_URL_PATTERNS)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="searxng_web_search",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True
+}
+)
 def web_search(
     query: str,
     num_results: int = 5,

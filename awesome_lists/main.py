@@ -3,23 +3,17 @@ import re
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("Awesome Lists")
+mcp = FastMCP("awesome_lists_mcp")
 
-AWESOME_README = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "../../../../Downloads/git/awesome/readme.md",
-)
-# Resolve to absolute path so it works regardless of working directory
 AWESOME_README = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../..", "Downloads/git/awesome/readme.md")
 )
 
 
 def _load_readme() -> str:
-    path = "/home/nero/Downloads/git/awesome/readme.md"
-    if not os.path.isfile(path):
+    if not os.path.isfile(AWESOME_README):
         return ""
-    with open(path, encoding="utf-8") as f:
+    with open(AWESOME_README, encoding="utf-8") as f:
         return f.read()
 
 
@@ -53,7 +47,15 @@ def _parse_sections(text: str) -> dict[str, list[dict]]:
     return sections
 
 
-@mcp.tool()
+@mcp.tool(
+    name="awesome_search_awesome_lists",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def search_awesome_lists(query: str) -> str:
     """
     Search the sindresorhus/awesome meta-list for curated resource collections.
@@ -117,7 +119,15 @@ def search_awesome_lists(query: str) -> str:
     return header + "\n".join(results)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="awesome_list_awesome_categories",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def list_awesome_categories() -> str:
     """
     List all top-level categories in the sindresorhus/awesome meta-list with item counts.
@@ -147,7 +157,15 @@ def list_awesome_categories() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="awesome_get_awesome_category",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def get_awesome_category(category: str) -> str:
     """
     Get all curated lists within a specific awesome category.

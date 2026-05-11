@@ -26,7 +26,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from openai import OpenAI
 
-mcp = FastMCP("LLM Tools")
+mcp = FastMCP("llm_mcp")
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -320,7 +320,15 @@ def _call_native(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_list_available_models",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+}
+)
 def list_available_models() -> str:
     """
     List all models currently loaded in Ollama with tier labels and metadata.
@@ -393,7 +401,15 @@ def list_available_models() -> str:
         return f"Error listing models: {e}"
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_summarize",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+}
+)
 def summarize(
     text: str,
     style: Literal["concise", "detailed", "bullets", "eli5"] = "concise",
@@ -453,7 +469,15 @@ def summarize(
     return _call(messages, model=model, tier=tier, temperature=0.3, max_tokens=max_tokens)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_ask_model",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+}
+)
 def ask_model(
     prompt: str,
     context: str = "",
@@ -515,7 +539,15 @@ def ask_model(
     return _call(messages, model=model, tier=tier, temperature=temperature, max_tokens=max_tokens)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_analyze_code",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+}
+)
 def analyze_code(
     code: str,
     language: str = "python",
@@ -570,7 +602,15 @@ def analyze_code(
     return _call(messages, model=model, tier=tier, temperature=0.2, max_tokens=max_tokens)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_interpret_data",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+}
+)
 def interpret_data(
     data: str,
     question: str,
@@ -628,7 +668,15 @@ def interpret_data(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_embed_text",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+}
+)
 def embed_text(
     text: str,
     model: str = "auto",
@@ -697,7 +745,15 @@ def embed_text(
         return f"Error generating embeddings: {err}"
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_model_info",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+}
+)
 def model_info(
     model: str = "",
 ) -> str:
@@ -765,7 +821,15 @@ def model_info(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_generate_code",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+}
+)
 def generate_code(
     prompt: str,
     language: str = "python",
@@ -823,7 +887,15 @@ def generate_code(
     return _call(messages, model=model, tier=tier, temperature=0.2, max_tokens=max_tokens)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="llm_agent_chat",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True
+}
+)
 def agent_chat(
     prompt: str,
     tools: str = "",
@@ -927,10 +999,11 @@ def agent_chat(
             for tc in tool_calls:
                 fn = tc.get("function", {})
                 tool_name = fn.get("name", "unknown")
+                tool_call_id = tc.get("id", "")
                 messages.append({
                     "role": "tool",
                     "content": f"[Tool '{tool_name}' result not available — agent must execute tools externally]",
-                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
                 })
         elif content:
             # Final answer — no more tool calls

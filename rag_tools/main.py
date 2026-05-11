@@ -4,6 +4,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import threading
 from datetime import datetime
 from typing import Literal
 
@@ -18,7 +19,7 @@ from mcp.server.fastmcp import FastMCP, Image
 from PIL import Image as PILImage
 
 # Initialize the MCP server
-mcp = FastMCP("RAG Document Tools")
+mcp = FastMCP("rag_mcp")
 md_converter = MarkItDown()
 
 # Initialize Vector DB Storage (Instant)
@@ -77,6 +78,7 @@ def _embed(texts: list[str]) -> list:
 # --- Helper: FTS5 / BM25 infrastructure ---
 
 _fts_conn: sqlite3.Connection | None = None
+_fts_lock = threading.Lock()
 
 
 def _get_fts_conn() -> sqlite3.Connection:
@@ -102,21 +104,23 @@ def _get_fts_conn() -> sqlite3.Connection:
 
 def _fts_index_chunks(chunks: list[str], source: str, collection: str) -> None:
     """Insert text chunks into the FTS5 keyword index."""
-    conn = _get_fts_conn()
-    rows = [(c, source, i, collection) for i, c in enumerate(chunks)]
-    conn.executemany(
-        "INSERT INTO chunks(text, source, chunk_idx, collection) VALUES (?,?,?,?)", rows
-    )
-    conn.commit()
+    with _fts_lock:
+        conn = _get_fts_conn()
+        rows = [(c, source, i, collection) for i, c in enumerate(chunks)]
+        conn.executemany(
+            "INSERT INTO chunks(text, source, chunk_idx, collection) VALUES (?,?,?,?)", rows
+        )
+        conn.commit()
 
 
 def _fts_delete_source(source: str, collection: str) -> None:
     """Remove all FTS5 chunks for a given source file and collection."""
-    conn = _get_fts_conn()
-    conn.execute(
-        "DELETE FROM chunks WHERE source=? AND collection=?", (source, collection)
-    )
-    conn.commit()
+    with _fts_lock:
+        conn = _get_fts_conn()
+        conn.execute(
+            "DELETE FROM chunks WHERE source=? AND collection=?", (source, collection)
+        )
+        conn.commit()
 
 
 def _bm25_search(query: str, collection: str, limit: int = 10) -> list[tuple]:
@@ -211,7 +215,15 @@ def format_size(size_bytes: int) -> str:
 
 
 # --- Tool 1: Metadata Discovery ---
-@mcp.tool()
+@mcp.tool(
+    name="rag_get_doc_metadata",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def get_doc_metadata(file_path: str) -> str:
     """
     USE THIS FIRST when encountering a new file path. Determine file type, size,
@@ -281,7 +293,15 @@ def get_doc_metadata(file_path: str) -> str:
 
 
 # --- Tool 2: Targeted Content Extraction ---
-@mcp.tool()
+@mcp.tool(
+    name="rag_read_doc_content",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def read_doc_content(
     file_path: str,
     start_page: int = 0,
@@ -360,7 +380,15 @@ def read_doc_content(
 
 
 # --- Tool 3: Visual Element Extraction (Vision Bridge) ---
-@mcp.tool()
+@mcp.tool(
+    name="rag_list_document_images",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def list_document_images(file_path: str) -> str:
     """
     Identify all images/figures embedded within a PDF document before attempting extraction.
@@ -399,7 +427,15 @@ def list_document_images(file_path: str) -> str:
     return "### Detected Images\n" + "\n".join(found_images)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="rag_extract_image_for_vision",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def extract_image_for_vision(file_path: str, image_id: int) -> str:
     """
     Extract a specific image from a PDF as Base64-encoded PNG data for vision model analysis.
@@ -437,7 +473,15 @@ def extract_image_for_vision(file_path: str, image_id: int) -> str:
 
 
 # --- Tool 4: Semantic Search (Vector RAG) ---
-@mcp.tool()
+@mcp.tool(
+    name="rag_index_document_for_search",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def index_document_for_search(file_path: str, collection_name: str = "default") -> str:
     """
     Prepare a document for semantic retrieval by chunking and storing in the Vector DB.
@@ -501,7 +545,15 @@ def index_document_for_search(file_path: str, collection_name: str = "default") 
     )
 
 
-@mcp.tool()
+@mcp.tool(
+    name="rag_semantic_search",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def semantic_search(
     query: str,
     collection_name: str = "default",
@@ -624,7 +676,15 @@ def semantic_search(
     return "\n---\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="rag_list_indexed_collections",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def list_indexed_collections() -> str:
     """
     Discover all available indexed collections and their document counts before indexing or searching.
@@ -668,7 +728,15 @@ def list_indexed_collections() -> str:
         return f"Error listing collections: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    name="rag_list_indexed_files",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def list_indexed_files(collection_name: str = "default") -> str:
     """
     List all source files indexed within a specific collection, with per-file chunk counts.
@@ -703,7 +771,15 @@ def list_indexed_files(collection_name: str = "default") -> str:
         return f"Error listing indexed files: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    name="rag_delete_from_index",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def delete_from_index(
     collection_name: str = "default",
     file_path: str = "",
@@ -732,10 +808,11 @@ def delete_from_index(
             chroma_client.delete_collection(name=collection_name)
             # Remove all FTS5 entries for this collection
             try:
-                _get_fts_conn().execute(
-                    "DELETE FROM chunks WHERE collection=?", (collection_name,)
-                )
-                _get_fts_conn().commit()
+                with _fts_lock:
+                    _get_fts_conn().execute(
+                        "DELETE FROM chunks WHERE collection=?", (collection_name,)
+                    )
+                    _get_fts_conn().commit()
             except Exception:
                 pass
             return f"Collection '{collection_name}' deleted successfully."
@@ -760,7 +837,15 @@ def delete_from_index(
         return f"Error deleting from index: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    name="rag_chunk_and_preview",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def chunk_and_preview(
     file_path: str,
     chunk_target: int = 800,
@@ -814,7 +899,15 @@ def chunk_and_preview(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="rag_compare_documents",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def compare_documents(
     file_path_a: str,
     file_path_b: str,
@@ -916,7 +1009,15 @@ def compare_documents(
 
 
 # --- Tool 5: Standalone Local Image Loader ---
-@mcp.tool()
+@mcp.tool(
+    name="rag_load_local_image",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def load_local_image(file_path: str):
     """
     Load and preprocess standalone image files for vision model analysis.

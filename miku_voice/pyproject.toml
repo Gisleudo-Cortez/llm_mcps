@@ -1,7 +1,7 @@
 [project]
-name = "current-date-time"
+name = "miku-voice"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server for text-to-Miku-voice synthesis via RVC pipeline"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

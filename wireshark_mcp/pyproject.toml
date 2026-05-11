@@ -1,0 +1,15 @@
+[project]
+name = "wireshark-mcp"
+version = "0.1.0"
+description = "MCP server wrapping tshark/capinfos for packet capture and analysis"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.0", "pydantic>=2.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+
+[project.scripts]
+wireshark-mcp = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["main*"]

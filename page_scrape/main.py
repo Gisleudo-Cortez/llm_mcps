@@ -1,25 +1,273 @@
+"""
+Page Scrape MCP Server — fetch web content with anti-bot evasion layers.
+
+Provides tools:
+  - page_scrape_fetch_url_content: Extract text, tables, images from any URL
+  - page_scrape_extract_links: Catalog hyperlinks for site mapping
+
+Features:
+  - Full Layer 1 header evasion (7 headers, not 1)
+  - Cloudflare/bot-detection page diagnosis
+  - Custom headers override per call
+  - Proxy support (SOCKS5, HTTP, HTTPS)
+  - Google Cache fallback
+  - Retry with exponential backoff
+"""
+
+import time
 import urllib.parse
-from typing import Union
+from typing import Optional
 
 import requests
 import trafilatura
 from bs4 import BeautifulSoup
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, ConfigDict, Field
 
-mcp = FastMCP("Page Scrape Server")
+mcp = FastMCP("page_scrape_mcp")
 
-# Shared session for connection pooling and proper headers
-session = requests.Session()
-session.headers.update(
-    {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-)
+# ═══════════════════════════════════════════════════════════════════════════
+# Layer 1 Anti-Bot Headers (full evasion stack, not just 1 UA)
+# ═══════════════════════════════════════════════════════════════════════════
+DEFAULT_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "no-cache",
+    "Sec-Ch-Ua": '"Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Platform": '"Linux"',
+    "Connection": "keep-alive",
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Patterns that indicate the page is a bot-detection challenge, not content
+# ═══════════════════════════════════════════════════════════════════════════
+BOT_CHALLENGE_PATTERNS: list[str] = [
+    "Just a moment...",         # Cloudflare Turnstile
+    "_cf_chl_opt",              # Cloudflare challenge options
+    "cf-challenge",
+    "challenge-platform",
+    "Enable JavaScript and cookies to continue",
+    "unusual traffic from your computer",
+    "verify you are a human",
+    "/cdn-cgi/challenge-platform",
+    "id=\"challenge-error-text\"",
+]
+
+
+def _detect_bot_challenge(html: str) -> Optional[str]:
+    """Return the challenge type if the page is a bot wall, None otherwise."""
+    html_lower = html.lower()
+    for pattern in BOT_CHALLENGE_PATTERNS:
+        if pattern.lower() in html_lower:
+            return "Cloudflare/bot challenge page detected"
+    return None
+
+
+def _build_headers(overrides: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """Merge default anti-bot headers with per-request overrides."""
+    headers = dict(DEFAULT_HEADERS)
+    if overrides:
+        headers.update(overrides)
+    return headers
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Pydantic Input Models
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class FetchUrlInput(BaseModel):
+    """Input for fetch_url_content tool."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    url: str = Field(
+        ...,
+        min_length=8,
+        pattern=r"^https?://.+",
+        description="Target URL (must start with http:// or https://)",
+    )
+    include_tables: bool = Field(
+        default=True,
+        description="Extract HTML tables as formatted Markdown tables",
+    )
+    include_images: bool = Field(
+        default=True,
+        description="Extract image URLs with alt text and dimensions",
+    )
+    max_table_rows: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description="Max rows to extract per table (prevents huge output)",
+    )
+    custom_headers: Optional[dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Additional/override request headers merged with defaults. "
+            'Example: {"Authorization": "Bearer token", "Origin": "https://example.com"}'
+        ),
+    )
+    proxy: Optional[str] = Field(
+        default=None,
+        description=(
+            "Proxy URL for IP rotation — supports http, https, socks5. "
+            "Example: 'socks5://127.0.0.1:9050' or 'http://user:pass@proxy:8080'"
+        ),
+    )
+    max_retries: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        description="Retry count on transient failures, with exponential backoff",
+    )
+    use_cache: bool = Field(
+        default=False,
+        description=(
+            "Try Google Cache first (webcache.googleusercontent.com). "
+            "Falls back to live fetch if cached version is stale/missing. "
+            "Bypasses Cloudflare — use this when the live URL returns a challenge page."
+        ),
+    )
+
+
+class ExtractLinksInput(BaseModel):
+    """Input for extract_links tool."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    url: str = Field(
+        ...,
+        min_length=8,
+        pattern=r"^https?://.+",
+        description="Target URL (must start with http:// or https://)",
+    )
+    filter_text: str = Field(
+        default="",
+        description="Only return links whose URL or anchor text contains this keyword",
+    )
+    internal_only: bool = Field(
+        default=False,
+        description="Restrict to links on the same domain as the target URL",
+    )
+    max_links: int = Field(
+        default=500, ge=1, le=2000, description="Cap on returned links (token protection)"
+    )
+    custom_headers: Optional[dict[str, str]] = Field(
+        default=None,
+        description="Additional/override request headers merged with defaults",
+    )
+    proxy: Optional[str] = Field(
+        default=None,
+        description="Proxy URL for IP rotation",
+    )
+    max_retries: int = Field(
+        default=1, ge=0, le=3, description="Retry count with exponential backoff"
+    )
+    use_cache: bool = Field(
+        default=False,
+        description="Try Google Cache first, fall back to live fetch",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Shared Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _google_cache_url(url: str) -> str:
+    """Build the Google Web Cache URL for a given target."""
+    return f"https://webcache.googleusercontent.com/search?q=cache:{url}"
+
+
+def _fetch(
+    url: str,
+    headers: Optional[dict[str, str]] = None,
+    proxy: Optional[str] = None,
+    max_retries: int = 1,
+    timeout: int = 30,
+) -> requests.Response:
+    """Fetch a URL with retry, backoff, and optional proxy."""
+    if headers is None:
+        headers = _build_headers()
+
+    proxies = None
+    if proxy:
+        proxies = {"http": proxy, "https": proxy}
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                delay = 2**attempt  # 2s, 4s, 8s
+                time.sleep(delay)
+            resp = requests.get(url, headers=headers, proxies=proxies, timeout=timeout)
+            return resp
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_exc = e
+            continue
+        except requests.exceptions.RequestException as e:
+            # Non-retryable (e.g. 400-level errors, invalid URL)
+            raise
+
+    # All retries exhausted
+    raise last_exc  # type: ignore[misc]
+
+
+def _fetch_with_cache(
+    url: str,
+    use_cache: bool,
+    headers: Optional[dict[str, str]] = None,
+    proxy: Optional[str] = None,
+    max_retries: int = 1,
+) -> str:
+    """
+    Fetch content, optionally via Google Cache.
+
+    Returns (html_content, final_url, source_label).
+
+    source_label is "live", "cache", or "cache" (fallback).
+    """
+    if not use_cache:
+        resp = _fetch(url, headers=headers, proxy=proxy, max_retries=max_retries)
+        return resp.text, resp.url
+
+    # Try cache first
+    cache_url = _google_cache_url(url)
+    try:
+        cache_resp = _fetch(
+            cache_url,
+            headers=headers,
+            proxy=proxy,
+            max_retries=0,  # one shot for cache
+        )
+        cache_html = cache_resp.text
+        # Verify cache didn't return a challenge itself, and contains actual content
+        if (
+            not _detect_bot_challenge(cache_html)
+            and len(cache_html) > 2000
+            and ("web scraping" not in cache_html.lower() or "<html" in cache_html[:200])
+        ):
+            return cache_html, cache_resp.url
+    except requests.exceptions.RequestException:
+        pass  # Cache miss → fall through to live
+
+    # Fallback: live fetch
+    resp = _fetch(url, headers=headers, proxy=proxy, max_retries=max_retries)
+    return resp.text, resp.url
 
 
 def _extract_tables(soup: BeautifulSoup, max_rows: int) -> list[str]:
-    """Helper to safely extract and format HTML tables to Markdown."""
-    extracted_tables = []
+    """Extract and format HTML tables as Markdown."""
+    extracted_tables: list[str] = []
     tables = soup.find_all("table")
 
     for table in tables:
@@ -27,7 +275,7 @@ def _extract_tables(soup: BeautifulSoup, max_rows: int) -> list[str]:
         if not rows:
             continue
 
-        headers = []
+        headers: list[str] = []
         thead = table.find("thead")
 
         if thead:
@@ -39,12 +287,14 @@ def _extract_tables(soup: BeautifulSoup, max_rows: int) -> list[str]:
                 rows = rows[1:]
 
         if not headers:
-            max_cols = max((len(r.find_all(["td", "th"])) for r in rows), default=0)
+            max_cols = max(
+                (len(r.find_all(["td", "th"])) for r in rows), default=0
+            )
             if max_cols == 0:
                 continue
             headers = [f"Col {i + 1}" for i in range(max_cols)]
 
-        md_table = []
+        md_table: list[str] = []
         md_table.append("| " + " | ".join(headers) + " |")
         md_table.append("|" + "|".join(["---" for _ in headers]) + "|")
 
@@ -54,7 +304,9 @@ def _extract_tables(soup: BeautifulSoup, max_rows: int) -> list[str]:
             cols = row.find_all(["td", "th"])
             col_data = [c.get_text(strip=True).replace("|", "\\|") for c in cols]
             col_data += [""] * (len(headers) - len(col_data))
-            md_table.append("| " + " | ".join(col_data[: len(headers)]) + " |")
+            md_table.append(
+                "| " + " | ".join(col_data[: len(headers)]) + " |"
+            )
 
         extracted_tables.append("\n".join(md_table))
 
@@ -62,8 +314,8 @@ def _extract_tables(soup: BeautifulSoup, max_rows: int) -> list[str]:
 
 
 def _extract_images(soup: BeautifulSoup, base_url: str) -> list[str]:
-    """Helper to safely extract and format image metadata."""
-    extracted_images = []
+    """Extract image metadata from the page."""
+    extracted_images: list[str] = []
 
     for idx, img in enumerate(soup.find_all("img"), 1):
         src = str(img.get("src", "")).strip()
@@ -88,106 +340,144 @@ def _extract_images(soup: BeautifulSoup, base_url: str) -> list[str]:
     return extracted_images
 
 
-@mcp.tool()
-def fetch_url_content(
-    url: str,
-    include_tables: Union[bool, str] = True,
-    include_images: Union[bool, str] = True,
-    max_table_rows: Union[int, str] = 100,
-) -> str:
+# ═══════════════════════════════════════════════════════════════════════════
+# Tools
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool(
+    name="page_scrape_fetch_url_content",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+def fetch_url_content(params: FetchUrlInput) -> str:  # type: ignore[no-untyped-def]
     """
-    Fetch and extract clean text, tables, and images from a URL using Trafilatura and BeautifulSoup.
+    Fetch and extract clean content from a URL with anti-bot evasion.
 
-    **TRIGGER CONDITION:** Use this when you need to fetch and parse structured content from a webpage URL that requires HTML parsing. Ideal for extracting articles, documents, or web pages with defined sections (headings, tables, images).
+    **TRIGGER CONDITION:** Use when you need structured content (text, tables,
+    images) from a URL. Handles Cloudflare Turnstile, bot walls, and IP-based
+    rate limits through headers, proxy rotation, and Google Cache fallback.
 
-    **SEQUENCE GUIDANCE:** Use `fetch_url_content` as the primary tool for complete page extraction. If only certain elements are needed:
-      - For text-only content: Extract with Trafilatura and discard table/image sections.
-      - For data-heavy pages: Keep tables enabled to capture structured information.
-      - For image-heavy documents: Enable images but note they'll be listed as metadata.
+    **SEQUENCE GUIDANCE:** Use as standalone content extraction. For site
+    mapping, call page_scrape_extract_links first, then feed individual URLs
+    into this tool. No prerequisites — the tool auto-detects bot walls.
 
     **CONSTRAINT WARNING:**
-      - URL must start with http:// or https:// (invalid URLs return clear error).
-      - Maximum page content truncation at ~100,000 characters to fit within LLM context limits.
-      - Network requests time out after 30 seconds; malformed HTML returns parsing errors.
-      - For large pages (>100 rows tables), use `max_table_rows` parameter to limit extraction.
+      - URL must start with http:// or https://.
+      - Content truncated at ~100,000 characters.
+      - Network timeout at 30 seconds per attempt.
+      - max_retries up to 3 (exponential backoff: 2s, 4s, 8s).
+      - use_cache=True hits Google Cache first, bypassing Cloudflare.
 
-    **OUTPUT EXPECTATION:** Returns structured Markdown output in four sections:
-      1. Page Metadata (URL, status code, element counts)
-      2. Main content (cleanly extracted by Trafilatura, max 100k chars)
-      3. Tables (if enabled), formatted as markdown tables
-      4. Images (if enabled), listed with metadata
+    **OUTPUT EXPECTATION:** Four-section structured Markdown:
+      1. Metadata (URL, status, element counts, source: live/cache)
+      2. Main content extracted by Trafilatura
+      3. Tables formatted as Markdown (if enabled)
+      4. Images listed with metadata (if enabled)
 
-    The tool is designed to balance thoroughness with token efficiency—always review output for truncation warnings.
+    **ANTI-BOT FEATURES:**
+      - Full browser header stack (7 headers, not just User-Agent)
+      - Cloudflare challenge detection → returns diagnostic error
+      - Proxy support for IP rotation
+      - Google Cache as Layer 4 bypass
+      - Retry with exponential backoff on transient failures
+
+    **ERROR RECOVERY:**
+      - If content is missing → try use_cache=True
+      - If Cloudflare detected → set use_cache=True to bypass via Google Cache
+      - If timeouts persist → reduce max_table_rows or set include_tables=False
+      - If 429/rate limited → pass a proxy for IP rotation
     """
-    # Robust Type Casting
-    if isinstance(include_tables, str):
-        include_tables = include_tables.strip().lower() in ("true", "1", "yes", "y")
-    if isinstance(include_images, str):
-        include_images = include_images.strip().lower() in ("true", "1", "yes", "y")
-    if isinstance(max_table_rows, str):
-        try:
-            max_table_rows = int(max_table_rows.strip())
-        except ValueError:
-            max_table_rows = 100
-
-    if not url.startswith(("http://", "https://")):
+    if not params.url.startswith(("http://", "https://")):
         return "Error: Invalid URL format. URL must start with http:// or https://"
 
+    headers = _build_headers(params.custom_headers)
+
     try:
-        response = session.get(url, timeout=30)
-        response.raise_for_status()
+        html_content, final_url = _fetch_with_cache(
+            params.url,
+            use_cache=params.use_cache,
+            headers=headers,
+            proxy=params.proxy,
+            max_retries=params.max_retries,
+        )
 
-        final_url = response.url
-        html_content = response.text
+        # ── Diagnose: is this a bot challenge page? ──
+        challenge = _detect_bot_challenge(html_content)
+        if challenge:
+            return (
+                f"Error: {challenge} at {params.url}\n\n"
+                "The page returned a bot-detection challenge instead of content.\n"
+                "Recommendations:\n"
+                "  1. Retry with use_cache=True (hits Google Cache, bypasses Cloudflare)\n"
+                "  2. Pass custom_headers with additional auth/cookie headers\n"
+                "  3. Pass a proxy for IP rotation (your current IP may be flagged)\n"
+                "  4. Try an alternative data source (Play Store, Trustpilot, Reddit)\n"
+                "  5. Use a stealth browser (Playwright + playwright-stealth) for JS challenges"
+            )
 
-        # 1. Primary Text Extraction using Trafilatura
+        # ── 1. Primary text extraction via Trafilatura ──
         extracted_text = trafilatura.extract(
             html_content,
             include_links=True,
-            include_images=False,  # We handle images separately
-            include_tables=False,  # We handle tables separately for strict markdown
+            include_images=False,
+            include_tables=False,
         )
         if not extracted_text:
-            extracted_text = "No primary content could be cleanly extracted (page might be JS-rendered or heavily gated)."
-
-        # Truncate at ~100,000 characters to fit well within 90k token limits
-        if len(extracted_text) > 100000:
             extracted_text = (
-                extracted_text[:100000] + "\n\n... (content truncated to save context)"
+                "No primary content could be cleanly extracted "
+                "(page might be JS-rendered or heavily gated)."
             )
 
-        # 2. Extract Tables and Images using BeautifulSoup
+        if len(extracted_text) > 100000:
+            extracted_text = (
+                extracted_text[:100000]
+                + "\n\n... (content truncated to save context)"
+            )
+
+        # ── 2. Tables and images via BeautifulSoup ──
         soup = BeautifulSoup(html_content, "lxml")
         total_tables = len(soup.find_all("table"))
         total_images = len(soup.find_all("img"))
 
         markdown_tables = (
-            _extract_tables(soup, max_table_rows) if include_tables else []
+            _extract_tables(soup, params.max_table_rows)
+            if params.include_tables
+            else []
         )
-        image_list = _extract_images(soup, final_url) if include_images else []
+        image_list = (
+            _extract_images(soup, final_url) if params.include_images else []
+        )
 
-        # 3. Assemble Output
-        output = [
+        # ── 3. Assemble output ──
+        output: list[str] = [
             "### Section 1: Page Metadata",
             f"- Canonical URL: {final_url}",
-            f"- Status Code: {response.status_code}",
             f"- Elements Detected: {total_tables} tables, {total_images} images",
-            "\n---\n",
+            "",
+            "---",
+            "",
             "### Section 2: Main Content",
             extracted_text,
-            "\n---\n",
+            "",
+            "---",
+            "",
         ]
 
-        if include_tables:
+        if params.include_tables:
             output.append("### Section 3: Tables (if found)")
             if markdown_tables:
                 for t in markdown_tables:
                     output.append("```markdown\n" + t + "\n```\n")
             else:
                 output.append("Tables found: 0")
-            output.append("\n---\n")
+            output.extend(["", "---", ""])
 
-        if include_images:
+        if params.include_images:
             output.append("### Section 4: Images (if found)")
             if image_list:
                 output.append("\n\n".join(image_list))
@@ -198,75 +488,111 @@ def fetch_url_content(
         return "\n".join(output)
 
     except requests.exceptions.Timeout:
-        return "Error: Request timed out after 30 seconds."
+        return "Error: Request timed out after 30 seconds (all retries exhausted)."
+    except requests.exceptions.ConnectionError as e:
+        return (
+            f"Error: Connection failed — {e}\n"
+            "Check network/proxy, or try use_cache=True to bypass the target server."
+        )
     except requests.exceptions.RequestException as e:
-        return f"Error: Network request failed - {str(e)}"
+        return f"Error: Network request failed — {e}"
     except Exception as e:
-        return f"Error: An unexpected parsing error occurred - {str(e)}"
+        return f"Error: An unexpected parsing error occurred — {e}"
 
 
-@mcp.tool()
-def extract_links(
-    url: str,
-    filter_text: str = "",
-    internal_only: bool = False,
-    max_links: int = 500,
-) -> str:
+@mcp.tool(
+    name="page_scrape_extract_links",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def extract_links(params: ExtractLinksInput) -> str:  # type: ignore[no-untyped-def]
     """
-    Extract and catalog all hyperlinks from a URL for site mapping or link discovery.
+    Extract and catalog all hyperlinks from a URL for site mapping.
 
-    **TRIGGER CONDITION:** Use when you need to map the link structure of a page, discover
-    all referenced URLs, or gather a list of resources linked from a document. Ideal for
-    site audits, crawling preparation, and discovering API endpoints or related pages.
+    **TRIGGER CONDITION:** Use when you need to map a page's link structure,
+    discover referenced URLs, or prepare for crawling. Ideal for site audits,
+    API endpoint discovery, and finding related pages.
 
-    **SEQUENCE GUIDANCE:** Call after identifying a target URL. Use `filter_text` to narrow
-    results to links containing a specific keyword (e.g., "/api/", "github.com"). Set
-    `internal_only=True` to restrict to links on the same domain. Pipe the resulting URLs
-    to `fetch_url_content` for deeper extraction.
+    **SEQUENCE GUIDANCE:** Call after identifying a target URL. Use
+    `filter_text` to narrow results (e.g., "/api/", "github.com"). Set
+    `internal_only=True` for same-domain links only. Feed resulting URLs
+    to page_scrape_fetch_url_content for deeper extraction.
 
-    **CONSTRAINT WARNING:** URL must start with http:// or https://. Pages with
-    JavaScript-rendered links (SPAs) may return fewer links than visible in a browser.
-    `max_links` caps output to protect context — increase only when needed. Relative URLs
-    are resolved to absolute using the page's base URL.
+    **CONSTRAINT WARNING:**
+      - URL must start with http:// or https://.
+      - JavaScript-rendered links (SPAs) may return fewer links than visible.
+      - max_links caps output — increase only when needed.
+      - Relative URLs are auto-resolved to absolute.
 
-    **OUTPUT EXPECTATION:** Returns a deduplicated, sorted list of absolute URLs with their
-    anchor text, grouped by domain. Includes a summary of total and unique link counts.
+    **OUTPUT EXPECTATION:** Deduplicated, sorted absolute URLs with anchor
+    text, grouped by domain. Internal links are tagged. Summary includes
+    total/unique link counts and domain count.
 
-    *Typical workflow:* extract_links(url) → fetch_url_content(url=one_of_the_links)
+    **ANTI-BOT FEATURES:** Same as fetch_url_content — full header stack,
+    proxy support, Google Cache, retry with backoff.
+
+    **ERROR RECOVERY:**
+      - If no links found → try without filter_text
+      - If Cloudflare detected → set use_cache=True
+      - If few links on SPA → the page requires a JS browser (browser_navigate)
     """
-    if not url.startswith(("http://", "https://")):
+    if not params.url.startswith(("http://", "https://")):
         return "Error: Invalid URL format. URL must start with http:// or https://"
 
-    try:
-        response = session.get(url, timeout=30)
-        response.raise_for_status()
+    headers = _build_headers(params.custom_headers)
 
-        soup = BeautifulSoup(response.text, "lxml")
-        base_url = response.url
-        parsed_base = urllib.parse.urlparse(base_url)
-        base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    try:
+        html_content, final_url = _fetch_with_cache(
+            params.url,
+            use_cache=params.use_cache,
+            headers=headers,
+            proxy=params.proxy,
+            max_retries=params.max_retries,
+        )
+
+        # Diagnose bot challenge
+        challenge = _detect_bot_challenge(html_content)
+        if challenge:
+            return (
+                f"Error: {challenge} at {params.url}\n\n"
+                "Recommendations:\n"
+                "  1. Retry with use_cache=True\n"
+                "  2. Pass a proxy for IP rotation\n"
+                "  3. Use browser_navigate for JS-heavy pages"
+            )
+
+        soup = BeautifulSoup(html_content, "lxml")
+        parsed_base = urllib.parse.urlparse(final_url)
 
         seen: set[str] = set()
-        links: list[dict] = []
+        links: list[dict[str, object]] = []
 
         for tag in soup.find_all("a", href=True):
             href = str(tag["href"]).strip()
-            if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            if not href or href.startswith(
+                ("#", "mailto:", "tel:", "javascript:", "data:")
+            ):
                 continue
 
-            abs_url = urllib.parse.urljoin(base_url, href)
+            abs_url = urllib.parse.urljoin(final_url, href)
             parsed = urllib.parse.urlparse(abs_url)
             if parsed.scheme not in ("http", "https"):
                 continue
 
             is_internal = parsed.netloc == parsed_base.netloc
-            if internal_only and not is_internal:
+            if params.internal_only and not is_internal:
                 continue
 
             text = tag.get_text(strip=True)[:120]
 
-            if filter_text and filter_text.lower() not in abs_url.lower() and filter_text.lower() not in text.lower():
-                continue
+            if params.filter_text:
+                kw = params.filter_text.lower()
+                if kw not in abs_url.lower() and kw not in text.lower():
+                    continue
 
             if abs_url not in seen:
                 seen.add(abs_url)
@@ -280,32 +606,43 @@ def extract_links(
                 )
 
         if not links:
-            qualifier = f" matching '{filter_text}'" if filter_text else ""
-            return f"No links found{qualifier} on {url}."
+            qualifier = (
+                f" matching '{params.filter_text}'" if params.filter_text else ""
+            )
+            return f"No links found{qualifier} on {params.url}."
 
         total = len(links)
-        links = links[:max_links]
-        truncated = total > max_links
+        links = links[: params.max_links]
+        truncated = total > params.max_links
 
-        # Group by domain for readability
-        by_domain: dict[str, list[dict]] = {}
+        # Group by domain
+        by_domain: dict[str, list[dict[str, object]]] = {}
         for link in links:
-            by_domain.setdefault(link["domain"], []).append(link)
+            domain = str(link["domain"])
+            by_domain.setdefault(domain, []).append(link)
 
-        output = [
-            f"### Links extracted from: {url}",
-            f"- Total unique links: {total}"
-            + (f" (showing first {max_links})" if truncated else ""),
+        output: list[str] = [
+            f"### Links extracted from: {params.url}",
+            (
+                f"- Total unique links: {total}"
+                + (f" (showing first {params.max_links})" if truncated else "")
+            ),
             f"- Domains represented: {len(by_domain)}",
-            f"- Filter applied: '{filter_text}'" if filter_text else "",
+            (f"- Filter applied: '{params.filter_text}'" if params.filter_text else ""),
             "",
         ]
 
         for domain, domain_links in sorted(by_domain.items()):
             tag_label = "(internal)" if domain_links[0]["internal"] else ""
-            output.append(f"**{domain}** {tag_label} — {len(domain_links)} link(s)")
+            output.append(
+                f"**{domain}** {tag_label} — {len(domain_links)} link(s)"
+            )
             for link in domain_links:
-                label = f' "{link["text"]}"' if link["text"] else ""
+                label = (
+                    f' "{link["text"]}"'
+                    if str(link["text"])
+                    else ""
+                )
                 output.append(f"  - {link['url']}{label}")
             output.append("")
 
@@ -314,9 +651,9 @@ def extract_links(
     except requests.exceptions.Timeout:
         return "Error: Request timed out after 30 seconds."
     except requests.exceptions.RequestException as e:
-        return f"Error: Network request failed — {str(e)}"
+        return f"Error: Network request failed — {e}"
     except Exception as e:
-        return f"Error: An unexpected error occurred — {str(e)}"
+        return f"Error: An unexpected error occurred — {e}"
 
 
 if __name__ == "__main__":

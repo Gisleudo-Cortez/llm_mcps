@@ -1,56 +1,29 @@
 import os
 import re
 import shutil
-import subprocess
+import sys
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
+# Import shared helper from parent directory
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _shared import run_command
+
 # Initialize the MCP server
-mcp = FastMCP("Arch System Tools")
-
-
-# --- Helper Function for Safe Subprocess Execution ---
-def run_command(cmd_list: list[str], max_chars: int = 50000) -> str:
-    """
-    Executes a shell command safely without using shell=True.
-    Captures stdout and stderr, handling decoding errors and truncating large outputs.
-    """
-    try:
-        # Run command with a strict timeout to prevent hanging processes
-        result = subprocess.run(
-            cmd_list,
-            capture_output=True,
-            text=True,
-            errors="replace",  # Replaces un-decodable bytes (e.g., binary files) with '?'
-            timeout=30,
-        )
-
-        output = result.stdout if result.returncode == 0 else result.stderr
-
-        if not output.strip():
-            return "Command executed successfully, but returned no output."
-
-        # Hard truncation to protect the LLM context window
-        if len(output) > max_chars:
-            return (
-                output[:max_chars]
-                + f"\n\n... [Output truncated at {max_chars} characters to protect context]"
-            )
-
-        return output
-
-    except FileNotFoundError:
-        binary = cmd_list[0]
-        return f"Error: The command '{binary}' was not found on the system. Please ensure it is installed."
-    except subprocess.TimeoutExpired:
-        return f"Error: Command '{' '.join(cmd_list)}' timed out after 30 seconds."
-    except Exception as e:
-        return f"Unexpected error executing command: {str(e)}"
+mcp = FastMCP("arch_mcp")
 
 
 # --- Tool 1: Directory Listing (eza) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_list_directory",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def list_directory(path: str = ".") -> str:
     """
     List directory contents using 'eza' before navigating or inspecting files.
@@ -88,7 +61,15 @@ def list_directory(path: str = ".") -> str:
 
 
 # --- Tool 2: Read File (cat) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_read_file",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def read_file(file_path: str, max_lines: int = 1000) -> str:
     """
     Extract text content from a file using 'cat' with optional line limiting.
@@ -130,7 +111,15 @@ def read_file(file_path: str, max_lines: int = 1000) -> str:
 
 
 # --- Tool 3: Search File Contents (ugrep) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_search_contents",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def search_contents(pattern: str, path: str = ".", max_matches: int = 100) -> str:
     """
     Find text patterns across files using 'ugrep' with regex support and binary filtering.
@@ -177,7 +166,15 @@ def search_contents(pattern: str, path: str = ".", max_matches: int = 100) -> st
 
 
 # --- Tool 4: Package Management (pacman / paru) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_query_packages",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def query_packages(
     manager: Literal["pacman", "paru"],
     operation: Literal["search_repo", "search_local", "info_repo", "info_local"],
@@ -222,7 +219,15 @@ def query_packages(
 
 
 # --- Tool 5: Git Operations Suite ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_git_operations",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def git_operations(
     operation: Literal["status", "diff", "log", "show", "blame"],
     repo_path: str = ".",
@@ -294,7 +299,15 @@ def git_operations(
 
 
 # --- Tool 6: Systemd Logs Explorer ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_systemd_logs",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def systemd_logs(service: str = "", lines: int = 50, boot_only: bool = True) -> str:
     """
     Retrieve system and service logs using `journalctl` for debugging failures.
@@ -341,7 +354,15 @@ def systemd_logs(service: str = "", lines: int = 50, boot_only: bool = True) -> 
 
 
 # --- Tool 7: Qalculate! (qalc) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_calculate",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def calculate(query: str) -> str:
     """
     Evaluate mathematical expressions and perform unit/currency conversions using 'qalc'.
@@ -377,7 +398,15 @@ def calculate(query: str) -> str:
 
 
 # --- Tool 8: System Information Explorer ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_get_system_info",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def get_system_info(
     target: Literal["os", "hardware", "desktop", "resources", "all"] = "all",
 ) -> str:
@@ -429,7 +458,15 @@ def get_system_info(
 
 
 # --- Tool 9: Process & Task Monitor (ps) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_process_monitor",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def process_monitor(sort_by: Literal["cpu", "memory"] = "cpu", limit: int = 20) -> str:
     """
     Identify resource-intensive processes using `ps` with CPU or memory sorting.
@@ -465,7 +502,15 @@ def process_monitor(sort_by: Literal["cpu", "memory"] = "cpu", limit: int = 20) 
 
 
 # --- Tool 10: Network Diagnostics (ss / ip) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_network_diagnostics",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def network_diagnostics(
     target: Literal["ports", "interfaces", "routes"] = "ports",
 ) -> str:
@@ -498,7 +543,15 @@ def network_diagnostics(
 
 
 # --- Tool 11: Service State Explorer (systemctl) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_service_status",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def service_status(service_name: str) -> str:
     """
     Check real-time status of systemd services for troubleshooting failures.
@@ -531,7 +584,15 @@ def service_status(service_name: str) -> str:
 
 
 # --- Tool 12: Container Fleet Status (docker) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_container_status",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def container_status(
     operation: Literal["list", "stats", "logs"] = "list",
     container_name: str = "",
@@ -574,7 +635,15 @@ def container_status(
 
 
 # --- Tool 14: Scheduled Tasks & Timers (systemctl) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_scheduled_tasks",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def scheduled_tasks(all_timers: bool = False) -> str:
     """
     List systemd timers for debugging scheduled background tasks and cron alternatives.
@@ -598,7 +667,15 @@ def scheduled_tasks(all_timers: bool = False) -> str:
 
 
 # --- Tool 15: Environment Variable Inspector (printenv) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_inspect_environment",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def inspect_environment(specific_var: str = "") -> str:
     """
     Inspect environment variables for debugging pathing, display, and build configuration issues.
@@ -628,7 +705,15 @@ def inspect_environment(specific_var: str = "") -> str:
 
 
 # --- Tool 16: Basic Connectivity & DNS Tester (ping / curl) ---
-@mcp.tool()
+@mcp.tool(
+    name="arch_test_connectivity",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def test_connectivity(host: str, method: Literal["ping", "http"] = "ping") -> str:
     """
     Test external network connectivity and DNS resolution for troubleshooting connection failures.

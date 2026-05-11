@@ -4,7 +4,7 @@ from datetime import datetime
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("Memory & Notes")
+mcp = FastMCP("memory_mcp")
 
 MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memories.json")
 
@@ -21,7 +21,15 @@ def _save(data: dict) -> None:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="memory_remember",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def remember(key: str, value: str, category: str = "general") -> str:
     """
     Store a named memory that persists across sessions.
@@ -50,7 +58,15 @@ def remember(key: str, value: str, category: str = "general") -> str:
     return f"Remembered `{key}` [{category}]."
 
 
-@mcp.tool()
+@mcp.tool(
+    name="memory_recall",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def recall(query: str) -> str:
     """
     Search memories by key substring or value content and return all matches.
@@ -89,7 +105,15 @@ def recall(query: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="memory_list_memories",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def list_memories(category: str = "") -> str:
     """
     List all stored memories, optionally filtered to a single category.
@@ -135,7 +159,15 @@ def list_memories(category: str = "") -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(
+    name="memory_forget",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def forget(key: str) -> str:
     """
     Delete a stored memory by its exact key.

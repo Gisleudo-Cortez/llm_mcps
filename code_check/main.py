@@ -1,36 +1,94 @@
 #!/usr/bin/env python3
-"""MCP server for code formatting and linting.
+"""MCP server for code formatting and linting using the Neovim tool chain.
 
-Mirrors the tool chain used in the Neovim config (conform.nvim + nvim-lint):
-  formatters : ruff, prettier, stylua, shfmt, fish_indent, gofumpt, rustfmt,
-               sqlfluff, clang-format, google-java-format, taplo, ktlint
-  linters    : ruff check, eslint, shellcheck, fish --no-execute, sqlfluff lint,
-               yamllint, markdownlint, ktlint
-               json / toml: validated via Python stdlib (no subprocess)
+Supported formatters: ruff, prettier, stylua, shfmt, fish_indent, gofumpt,
+  rustfmt, sqlfluff, clang-format, google-java-format, taplo, ktlint
+Supported linters: ruff check, eslint, shellcheck, fish --no-execute,
+  sqlfluff lint, yamllint, markdownlint, ktlint
+Built-in (no subprocess): json, toml validation via Python stdlib.
 """
-import json
+
+import json as _json
 import os
 import subprocess
 import tempfile
 import tomllib
 from contextlib import contextmanager
+from enum import Enum
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, ConfigDict, Field
 
-mcp = FastMCP("Code Check Server")
+mcp = FastMCP("code_check_mcp")
 
-# ── Per-language config ───────────────────────────────────────────────────────
+
+# ── Enums ────────────────────────────────────────────────────────────────────────
+
+class _ResponseFormat(str, Enum):
+    markdown = "markdown"
+    json = "json"
+
+
+# ── Pydantic input models ────────────────────────────────────────────────────────
+
+class FormatCodeInput(BaseModel):
+    """Input for formatting source code."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    code: str = Field(..., description="Source code to format.", min_length=1)
+    language: str = Field(
+        ...,
+        description=(
+            "Programming language. Supported: python, javascript, typescript, go, "
+            "rust, lua, shell, bash, fish, sql, yaml, json, markdown, c, cpp, "
+            "java, toml, kotlin and common aliases (py, js, ts, sh, yml, md, cc, "
+            "cxx, h, hpp)."
+        ),
+        min_length=1,
+        max_length=20,
+    )
+
+
+class LintCodeInput(BaseModel):
+    """Input for linting source code."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    code: str = Field(..., description="Source code to lint.", min_length=1)
+    language: str = Field(
+        ...,
+        description="Programming language. See format_code for supported values.",
+        min_length=1,
+        max_length=20,
+    )
+
+
+class CheckCodeInput(BaseModel):
+    """Input for combined format + lint in one pass."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    code: str = Field(..., description="Source code to format and lint.", min_length=1)
+    language: str = Field(
+        ...,
+        description="Programming language. See format_code for supported values.",
+        min_length=1,
+        max_length=20,
+    )
+
+
+# ── Language configuration ───────────────────────────────────────────────────────
+
 # fmt_cmd / lint_cmd : arg list; {file} is replaced with the temp file path.
-# fmt_inplace        : True  → formatter writes the file in-place (read back after).
-#                      False → formatter writes formatted code to stdout.
-# lint_cmd           : None  → no standalone linter for this language.
+# fmt_inplace : True  → formatter writes file in-place (read back after).
+#               False → formatter writes to stdout.
+# lint_cmd : None  → no standalone linter configured for this language.
 
 _CONFIGS: dict[str, dict] = {
     "python": {
         "ext": ".py",
         "fmt_cmd": ["ruff", "format", "{file}"],
         "fmt_inplace": True,
-        "lint_cmd": ["ruff", "check", "--output-format", "text", "{file}"],
+        "lint_cmd": ["ruff", "check", "--output-format", "concise", "{file}"],
     },
     "javascript": {
         "ext": ".js",
@@ -46,22 +104,18 @@ _CONFIGS: dict[str, dict] = {
     },
     "go": {
         "ext": ".go",
-        # gofumpt is a strict superset of gofmt; -w writes in-place
         "fmt_cmd": ["gofumpt", "-w", "{file}"],
         "fmt_inplace": True,
-        # go vet needs a proper module — no standalone linter here
         "lint_cmd": None,
     },
     "rust": {
         "ext": ".rs",
         "fmt_cmd": ["rustfmt", "{file}"],
         "fmt_inplace": True,
-        # clippy requires a Cargo project — no standalone linter here
         "lint_cmd": None,
     },
     "lua": {
         "ext": ".lua",
-        # Match nvim stylua settings from formatting.lua
         "fmt_cmd": [
             "stylua",
             "--column-width", "100",
@@ -74,7 +128,6 @@ _CONFIGS: dict[str, dict] = {
     },
     "shell": {
         "ext": ".sh",
-        # Match nvim shfmt settings: 2-space indent, case-indent
         "fmt_cmd": ["shfmt", "-i", "2", "-ci", "-w", "{file}"],
         "fmt_inplace": True,
         "lint_cmd": ["shellcheck", "{file}"],
@@ -93,7 +146,6 @@ _CONFIGS: dict[str, dict] = {
     },
     "sql": {
         "ext": ".sql",
-        # Match nvim sqlfluff dialect setting
         "fmt_cmd": ["sqlfluff", "format", "--dialect", "ansi", "{file}"],
         "fmt_inplace": True,
         "lint_cmd": ["sqlfluff", "lint", "--dialect", "ansi", "{file}"],
@@ -108,7 +160,7 @@ _CONFIGS: dict[str, dict] = {
         "ext": ".json",
         "fmt_cmd": ["prettier", "--write", "{file}"],
         "fmt_inplace": True,
-        "lint_cmd": None,  # validated via _BUILTIN_LINT["json"]
+        "lint_cmd": None,
     },
     "markdown": {
         "ext": ".md",
@@ -120,7 +172,7 @@ _CONFIGS: dict[str, dict] = {
         "ext": ".c",
         "fmt_cmd": ["clang-format", "-i", "{file}"],
         "fmt_inplace": True,
-        "lint_cmd": None,  # clang-tidy needs compile_commands.json
+        "lint_cmd": None,
     },
     "cpp": {
         "ext": ".cpp",
@@ -138,7 +190,7 @@ _CONFIGS: dict[str, dict] = {
         "ext": ".toml",
         "fmt_cmd": ["taplo", "fmt", "{file}"],
         "fmt_inplace": True,
-        "lint_cmd": None,  # validated via _BUILTIN_LINT["toml"]
+        "lint_cmd": None,
     },
     "kotlin": {
         "ext": ".kt",
@@ -148,33 +200,37 @@ _CONFIGS: dict[str, dict] = {
     },
 }
 
-# Common language aliases / extensions → canonical key
+# Language aliases → canonical key
 _ALIASES: dict[str, str] = {
-    "py":    "python",
-    "js":    "javascript",
-    "jsx":   "javascript",
-    "ts":    "typescript",
-    "tsx":   "typescript",
-    "sh":    "shell",
-    "zsh":   "shell",
-    "yml":   "yaml",
-    "md":    "markdown",
-    "cc":    "cpp",
-    "cxx":   "cpp",
-    "h":     "c",
-    "hpp":   "cpp",
+    "py": "python",
+    "js": "javascript",
+    "jsx": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "sh": "shell",
+    "zsh": "shell",
+    "yml": "yaml",
+    "md": "markdown",
+    "cc": "cpp",
+    "cxx": "cpp",
+    "h": "c",
+    "hpp": "cpp",
 }
 
 
 def _resolve_lang(language: str) -> str | None:
+    """Resolve a language name or alias to the canonical internal key."""
     lang = language.lower().strip().lstrip(".")
     if lang in _CONFIGS:
         return lang
     return _ALIASES.get(lang)
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────────────
+
 @contextmanager
 def _tmp_file(code: str, ext: str):
+    """Write code to a temporary file, yield its path, then clean up."""
     fd, path = tempfile.mkstemp(suffix=ext)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -188,6 +244,7 @@ def _tmp_file(code: str, ext: str):
 
 
 def _run(cmd_template: list[str], file_path: str, timeout: int = 30) -> tuple[int, str, str]:
+    """Execute a command template with {file} replaced by the actual path."""
     cmd = [arg.replace("{file}", file_path) for arg in cmd_template]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -200,9 +257,9 @@ def _run(cmd_template: list[str], file_path: str, timeout: int = 30) -> tuple[in
 
 def _json_lint(code: str) -> str:
     try:
-        json.loads(code)
+        _json.loads(code)
         return ""
-    except json.JSONDecodeError as exc:
+    except _json.JSONDecodeError as exc:
         return f"JSON parse error: {exc}"
 
 
@@ -220,103 +277,88 @@ _BUILTIN_LINT: dict[str, object] = {
 }
 
 
-# ── MCP tools ─────────────────────────────────────────────────────────────────
+# ── Tools ────────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def format_code(code: str, language: str) -> str:
+@mcp.tool(
+    name="code_check_format_code",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def code_check_format_code(params: FormatCodeInput) -> str:
     """Format source code using the same formatter as the Neovim config.
 
-    **TRIGGER CONDITION**: Use whenever you have generated or edited source code
-    that should be properly formatted before being shown to the user or saved to
-    a file. Works on snippets, functions, or complete files.
+    **TRIGGER CONDITION**: Use whenever you have generated or edited source
+    code that should be properly formatted before being shown to the user or
+    saved to a file.
 
-    **SEQUENCE GUIDANCE**: Call before lint_code so the linter sees
-    consistently-indented, clean code. For a combined format + lint pass, use
-    check_code instead to avoid writing the file twice.
+    **SEQUENCE GUIDANCE**: Call before `lint_code` so the linter sees
+    consistently-indented, clean code. For a combined pass, use `check_code`.
 
-    **CONSTRAINT WARNING**: The formatter binary must be on PATH (same tools
-    installed for Neovim via Mason). Returns the original code with an error
-    prefix if the tool is missing. Go (gofumpt) and Rust (rustfmt) may reject
-    snippets that lack required boilerplate (package declaration, module setup).
+    **CONSTRAINT WARNING**: Formatter binary must be on PATH. Go (gofumpt) and
+    Rust (rustfmt) may reject snippets that lack required boilerplate.
 
     **OUTPUT EXPECTATION**: Returns the formatted source code as a plain string
-    on success. On failure, returns the original code prefixed with an error line.
-
-    Supported languages (and aliases):
-      python (py), javascript (js, jsx), typescript (ts, tsx), go, rust,
-      lua, shell (sh, zsh), bash, fish, sql, yaml (yml), json, markdown (md),
-      c (h), cpp (cc, cxx, hpp), java, toml, kotlin
+    on success, or the original code with an error prefix on failure.
     """
-    lang = _resolve_lang(language)
+    lang = _resolve_lang(params.language)
     if lang is None:
-        return (
-            f"[code_check] Unknown language '{language}'. "
-            f"Supported: {', '.join(sorted(_CONFIGS))}"
-        )
+        return f"[code_check] Unknown language '{params.language}'. Supported: {', '.join(sorted(_CONFIGS))}"
 
     cfg = _CONFIGS[lang]
-    with _tmp_file(code, cfg["ext"]) as path:
+    with _tmp_file(params.code, cfg["ext"]) as path:
         rc, stdout, stderr = _run(cfg["fmt_cmd"], path)
         if rc == -1:
-            return f"[code_check] Formatter unavailable — {stderr}\n\n{code}"
+            return f"[code_check] Formatter unavailable — {stderr}\n\n{params.code}"
         if rc != 0 and not cfg["fmt_inplace"]:
-            # stdout-mode formatter failed
             err = (stderr or stdout).strip()
-            return f"[code_check] Formatter error (exit {rc}) — {err}\n\n{code}"
+            return f"[code_check] Formatter error (exit {rc}) — {err}\n\n{params.code}"
         if cfg["fmt_inplace"]:
             with open(path, encoding="utf-8") as f:
                 return f.read()
-        return stdout if stdout else code
+        return stdout if stdout else params.code
 
 
-@mcp.tool()
-def lint_code(code: str, language: str) -> str:
+@mcp.tool(
+    name="code_check_lint_code",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def code_check_lint_code(params: LintCodeInput) -> str:
     """Check source code for syntax errors and style violations.
 
     **TRIGGER CONDITION**: Use when you want to verify that generated or edited
-    code has no syntax errors or obvious quality issues before presenting it.
+    code has no syntax errors or obvious quality issues.
 
-    **SEQUENCE GUIDANCE**: Run after format_code so that pure style warnings
-    don't obscure real errors. For a combined pass use check_code.
+    **SEQUENCE GUIDANCE**: Run after `format_code` so style warnings don't
+    obscure real errors. For a combined pass, use `check_code`.
 
     **CONSTRAINT WARNING**: Not all languages have a standalone linter that
-    works on isolated snippets. Languages without one (Go, Rust, C/C++, Java,
-    Lua) return "[no linter]". ESLint for JS/TS requires a config file in the
-    working directory — without one it will report a config error.
+    works on isolated snippets. Returns "[no linter]" when none is configured.
 
-    **OUTPUT EXPECTATION**: Returns linter output as a plain-text string.
-    "No issues found." when the linter exits clean.
-    "[no linter] ..." when no linter is configured for the language.
-
-    Linter coverage:
-      python → ruff check (E, F, I, B, UP, SIM rules)
-      javascript / typescript → eslint
-      shell / bash → shellcheck
-      fish → fish --no-execute
-      sql → sqlfluff lint (dialect: ansi)
-      yaml → yamllint
-      json → json.loads (Python stdlib, no subprocess)
-      markdown → markdownlint
-      toml → tomllib.loads (Python stdlib, no subprocess)
-      kotlin → ktlint
+    **OUTPUT EXPECTATION**: Returns linter output as plain text. "No issues
+    found." when clean.
     """
-    lang = _resolve_lang(language)
+    lang = _resolve_lang(params.language)
     if lang is None:
-        return (
-            f"[code_check] Unknown language '{language}'. "
-            f"Supported: {', '.join(sorted(_CONFIGS))}"
-        )
+        return f"[code_check] Unknown language '{params.language}'. Supported: {', '.join(sorted(_CONFIGS))}"
 
-    # Built-in linters (stdlib, no subprocess)
     if lang in _BUILTIN_LINT:
-        result = _BUILTIN_LINT[lang](code)
+        result = _BUILTIN_LINT[lang](params.code)
         return result if result else "No issues found."
 
     cfg = _CONFIGS[lang]
     if cfg["lint_cmd"] is None:
         return f"[no linter] No standalone linter configured for {lang}."
 
-    with _tmp_file(code, cfg["ext"]) as path:
+    with _tmp_file(params.code, cfg["ext"]) as path:
         rc, stdout, stderr = _run(cfg["lint_cmd"], path)
         if rc == -1:
             return f"[code_check] Linter unavailable — {stderr}"
@@ -324,42 +366,44 @@ def lint_code(code: str, language: str) -> str:
         return combined if combined else "No issues found."
 
 
-@mcp.tool()
-def check_code(code: str, language: str) -> str:
+@mcp.tool(
+    name="code_check_check_code",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def code_check_check_code(params: CheckCodeInput) -> str:
     """Format code and lint it in a single pass, returning both results.
 
     **TRIGGER CONDITION**: Use as the primary quality gate on any generated
-    code block. Prefer this over calling format_code + lint_code separately
-    unless you need only one of the two results.
+    code block. Prefer this over calling `format_code` + `lint_code` separately.
 
     **SEQUENCE GUIDANCE**: Call once per generated code block. If the LINT
-    section reports issues, fix the code and call check_code again. Keep
+    section reports issues, fix the code and call `check_code` again. Keep
     iterating until LINT shows "No issues found."
-
-    **CONSTRAINT WARNING**: Both the formatter and linter must be installed on
-    PATH. Missing tools are reported inline per section rather than raising an
-    error. Snippet limitations (no Go module, no Rust crate, no ESLint config)
-    apply — see format_code and lint_code for details.
 
     **OUTPUT EXPECTATION**: Returns a two-section plain-text report:
 
-        === FORMAT (python) ===
+        === FORMAT (<lang>) ===
         <formatted code or error>
 
         === LINT ===
         <issues or "No issues found." or "[no linter] ...">
     """
-    lang = _resolve_lang(language)
+    lang = _resolve_lang(params.language)
     if lang is None:
-        return (
-            f"[code_check] Unknown language '{language}'. "
-            f"Supported: {', '.join(sorted(_CONFIGS))}"
-        )
+        return f"[code_check] Unknown language '{params.language}'. Supported: {', '.join(sorted(_CONFIGS))}"
 
-    formatted = format_code(code, language)
-    # Lint the formatted code when formatting succeeded; fall back to original
-    code_to_lint = code if formatted.startswith("[code_check]") else formatted
-    lint_result = lint_code(code_to_lint, language)
+    formatted = code_check_format_code(
+        FormatCodeInput(code=params.code, language=params.language)
+    )
+    code_to_lint = params.code if formatted.startswith("[code_check]") else formatted
+    lint_result = code_check_lint_code(
+        LintCodeInput(code=code_to_lint, language=params.language)
+    )
 
     return f"=== FORMAT ({lang}) ===\n{formatted}\n\n=== LINT ===\n{lint_result}"
 

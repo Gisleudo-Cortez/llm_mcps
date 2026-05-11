@@ -4,7 +4,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("Data Query Server")
+mcp = FastMCP("data_query_mcp")
 
 _MAX_ROWS = 500
 _MAX_CHARS = 80000
@@ -22,7 +22,15 @@ def _rows_to_markdown(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
 
 # ── SQLite tools ─────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(
+    name="data_query_query_sqlite",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def query_sqlite(db_path: str, sql: str) -> str:
     """
     Execute a SQL query against a SQLite database file and return results as Markdown.
@@ -77,7 +85,15 @@ def query_sqlite(db_path: str, sql: str) -> str:
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    name="data_query_list_sqlite_tables",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def list_sqlite_tables(db_path: str) -> str:
     """
     List all tables in a SQLite database with their row counts.
@@ -102,7 +118,11 @@ def list_sqlite_tables(db_path: str) -> str:
 
         lines = [f"### Tables in `{os.path.basename(db_path)}`\n"]
         for table in tables:
-            count = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]  # noqa: S608
+            # Validate table name before using in query (defense-in-depth)
+            if not all(c.isalnum() or c in ("_", "-") for c in table):
+                lines.append(f"- **{table}** — (skipped: invalid name)")
+                continue
+            count = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
             lines.append(f"- **{table}** — {count:,} rows")
 
         con.close()
@@ -112,7 +132,15 @@ def list_sqlite_tables(db_path: str) -> str:
         return f"Error: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    name="data_query_describe_table",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def describe_table(db_path: str, table_name: str) -> str:
     """
     Show the schema (column names, types, constraints) for a SQLite table.
@@ -155,7 +183,15 @@ def describe_table(db_path: str, table_name: str) -> str:
 
 # ── DuckDB tool ───────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@mcp.tool(
+    name="data_query_query_duckdb",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False
+}
+)
 def query_duckdb(sql: str) -> str:
     """
     Execute SQL with DuckDB — queries CSV, Parquet, JSON, and SQLite files directly
