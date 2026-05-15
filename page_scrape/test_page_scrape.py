@@ -303,6 +303,103 @@ def test_extract_links_respects_max_links(mock_fetch):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# _detect_and_format_json
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_detect_json_object():
+    from main import _detect_and_format_json
+    result = _detect_and_format_json('{"key": "value", "num": 42}')
+    assert result is not None
+    assert '"key"' in result
+    assert '"num"' in result
+
+
+def test_detect_json_array():
+    from main import _detect_and_format_json
+    result = _detect_and_format_json('[1, 2, 3]')
+    assert result is not None
+    assert "3" in result
+
+
+def test_detect_json_html_returns_none():
+    from main import _detect_and_format_json
+    result = _detect_and_format_json("<html><body>hi</body></html>")
+    assert result is None
+
+
+def test_detect_json_plain_text_returns_none():
+    from main import _detect_and_format_json
+    result = _detect_and_format_json("Hello world")
+    assert result is None
+
+
+def test_detect_json_empty_returns_none():
+    from main import _detect_and_format_json
+    assert _detect_and_format_json("") is None
+
+
+def test_detect_json_nested():
+    from main import _detect_and_format_json
+    result = _detect_and_format_json(
+        '{"users": [{"name": "Alice"}, {"name": "Bob"}], "count": 2}'
+    )
+    assert result is not None
+    assert "Alice" in result
+    assert "Bob" in result
+
+
+def test_detect_json_truncates_large_payload():
+    from main import _detect_and_format_json
+    result = _detect_and_format_json('[1]', max_length=5)
+    assert result is not None
+    assert "truncated" in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# fetch_url_content handles JSON responses
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@patch("main._fetch_with_redirect_control")
+def test_fetch_json_api_response(mock_fetch):
+    """JSON API responses bypass trafilatura and get pretty-printed."""
+    mock_fetch.return_value = _make_mock_response(
+        text='{"origin": "1.2.3.4"}',
+        url="https://httpbin.org/ip",
+    )
+    result = fetch_url_content(FetchUrlInput(url="https://httpbin.org/ip"))
+    assert '"origin"' in result
+    assert "1.2.3.4" in result
+    assert "No primary content" not in result
+
+
+@patch("main._fetch_with_redirect_control")
+def test_fetch_json_array_response(mock_fetch):
+    """JSON array responses get pretty-printed."""
+    mock_fetch.return_value = _make_mock_response(
+        text='[{"id": 1}, {"id": 2}]',
+        url="https://api.example.com/items",
+    )
+    result = fetch_url_content(FetchUrlInput(url="https://api.example.com/items"))
+    assert '"id"' in result
+    assert "No primary content" not in result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SSRF error message uses "SSRF blocked" prefix
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@patch("main._fetch_with_redirect_control")
+def test_fetch_ssrf_blocked_clean_message(mock_fetch):
+    """SSRF ValueError should surface as 'SSRF blocked', not 'unexpected parsing error'."""
+    mock_fetch.side_effect = ValueError(
+        "SSRF blocked: localhost resolves to 127.0.0.1 which is in blocked range 127.0.0.0/8"
+    )
+    result = fetch_url_content(FetchUrlInput(url="http://localhost:8080/"))
+    assert "SSRF blocked" in result
+    assert "unexpected" not in result.lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SSRF integration: redirect to internal IP is blocked
 # ═══════════════════════════════════════════════════════════════════════════════
 

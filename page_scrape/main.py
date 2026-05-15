@@ -15,6 +15,7 @@ Features:
 """
 
 import ipaddress
+import json
 import socket
 import time
 import urllib.parse
@@ -232,6 +233,29 @@ class ExtractLinksInput(BaseModel):
 def _google_cache_url(url: str) -> str:
     """Build the Google Web Cache URL for a given target."""
     return f"https://webcache.googleusercontent.com/search?q=cache:{url}"
+
+
+def _detect_and_format_json(raw_text: str, max_length: int = 100000) -> Optional[str]:
+    """Sniff content for JSON and pretty-print it if detected.
+
+    Returns formatted JSON text, or None if the content is not JSON.
+    This allows JSON API responses to bypass trafilatura (which only handles HTML).
+    """
+    stripped = raw_text.strip()
+    if not stripped or stripped[0] not in ("{", "["):
+        return None
+
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    # Pretty-print and truncate if needed
+    formatted = json.dumps(parsed, indent=2, ensure_ascii=False)
+    if len(formatted) > max_length:
+        formatted = formatted[:max_length] + "\n\n... (content truncated to save context)"
+
+    return formatted
 
 
 def _fetch_with_redirect_control(
@@ -515,24 +539,29 @@ def fetch_url_content(params: FetchUrlInput) -> str:  # type: ignore[no-untyped-
                 "  5. Use a stealth browser (Playwright + playwright-stealth) for JS challenges"
             )
 
-        # ── 1. Primary text extraction via Trafilatura ──
-        extracted_text = trafilatura.extract(
-            html_content,
-            include_links=True,
-            include_images=False,
-            include_tables=False,
-        )
-        if not extracted_text:
-            extracted_text = (
-                "No primary content could be cleanly extracted "
-                "(page might be JS-rendered or heavily gated)."
+        # ── 1. Primary text extraction ──
+        # Detect JSON responses first (trafilatura only handles HTML)
+        json_content = _detect_and_format_json(html_content)
+        if json_content is not None:
+            extracted_text = json_content
+        else:
+            extracted_text = trafilatura.extract(
+                html_content,
+                include_links=True,
+                include_images=False,
+                include_tables=False,
             )
+            if not extracted_text:
+                extracted_text = (
+                    "No primary content could be cleanly extracted "
+                    "(page might be JS-rendered or heavily gated)."
+                )
 
-        if len(extracted_text) > 100000:
-            extracted_text = (
-                extracted_text[:100000]
-                + "\n\n... (content truncated to save context)"
-            )
+            if len(extracted_text) > 100000:
+                extracted_text = (
+                    extracted_text[:100000]
+                    + "\n\n... (content truncated to save context)"
+                )
 
         # ── 2. Tables and images via BeautifulSoup ──
         soup = BeautifulSoup(html_content, "lxml")
@@ -591,8 +620,11 @@ def fetch_url_content(params: FetchUrlInput) -> str:  # type: ignore[no-untyped-
         )
     except requests.exceptions.RequestException as e:
         return f"Error: Network request failed — {e}"
+    except ValueError as e:
+        # SSRF blocks and redirect limit violations surface here
+        return f"Error: SSRF blocked — {e}"
     except Exception as e:
-        return f"Error: An unexpected parsing error occurred — {e}"
+        return f"Error: An unexpected error occurred — {e}"
 
 
 @mcp.tool(
@@ -747,6 +779,8 @@ def extract_links(params: ExtractLinksInput) -> str:  # type: ignore[no-untyped-
         return "Error: Request timed out after 30 seconds."
     except requests.exceptions.RequestException as e:
         return f"Error: Network request failed — {e}"
+    except ValueError as e:
+        return f"Error: SSRF blocked — {e}"
     except Exception as e:
         return f"Error: An unexpected error occurred — {e}"
 
