@@ -10,6 +10,7 @@ A collection of independent MCP (Model Context Protocol) servers built with [Fas
 
 | Directory | Server Name | Purpose |
 |-----------|-------------|---------|
+| `email_management/` | Email Management | Classify emails, route attachments, process inboxes using himalaya + local LLMs |
 | `page_scrape/` | Page Scrape Server | Fetch/parse web pages; extract links for site mapping (Trafilatura + BeautifulSoup) |
 | `rag_tools/` | RAG Document Tools | Document reading, indexing, and semantic search (ChromaDB + SentenceTransformers) |
 | `current_date_time/` | System Utilities Server | Date/time tools with timezone support |
@@ -53,7 +54,7 @@ ruff format .
 
 **Syntax-check all files at once:**
 ```sh
-python3 -c "import ast; [print('OK', f) or ast.parse(open(f).read()) for f in ['rag_tools/main.py','arch_system_tools/main.py','local_searxng/main.py','python_repl/main.py','data_query/main.py','memory_notes/main.py']]"
+python3 -c "import ast; [print('OK', f) or ast.parse(open(f).read()) for f in ['email_management/main.py','rag_tools/main.py','arch_system_tools/main.py','local_searxng/main.py','python_repl/main.py','data_query/main.py','memory_notes/main.py']]"
 ```
 
 ## Architecture
@@ -129,6 +130,19 @@ Override the auto-selected model via `LLM_TOOLS_DEFAULT_MODEL` env var.
 - `interpret_data(data, question, model)` → plain-language data analysis. Temperature 0.4.
 - Model resolution order: explicit arg > `LLM_TOOLS_DEFAULT_MODEL` env var > first loaded model > hardcoded fallback.
 - A module-level `_client` is lazily initialized to avoid blocking the MCP handshake.
+
+### Email Management (`email_management/`)
+
+Classifies emails and routes attachments using a tiered async LLM pipeline. Zero cloud by default; OpenRouter fallback is opt-in via config.
+
+- **All tool functions are async** — FastMCP handles them natively. The old `asyncio.run()` pattern was removed (it failed with "cannot be called from a running event loop").
+- **Async classifier** (`async_classifier.py`) uses `httpx.AsyncClient` for Ollama HTTP API and OpenRouter cloud fallback. Supports `asyncio.Semaphore`-limited concurrent classification.
+- **Keyword fallback** triggers when all tiers fail (model not loaded, timeout, no API key). Fast, deterministic, low confidence.
+- **Himalaya wrapper** (`himalaya_wrapper.py`) shells out to the `himalaya` CLI with `--output json`. Credentials live in himalaya's own `config.toml` — this server never sees passwords.
+- **Router** (`router.py`) loads YAML rules with glob-pattern matching on sender/recipient. Paths support `{sender_domain}`, `{date}`, `{label}` templates.
+- **Tools**: `check_connection`, `list_accounts`, `list_rules`, `classify_email_tool`, `filter_attachments`, `route_attachments`, `process_inbox`.
+- **Config**: `~/.config/email-mcp/server_config.yaml`. See project README for full schema.
+- **Run tests**: `cd email_management && uv run pytest tests/ -v`
 
 ### Command Docs (`command_docs/`)
 
