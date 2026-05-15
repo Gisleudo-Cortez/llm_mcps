@@ -33,9 +33,9 @@ class MessageBody:
 def _run_himalaya(args: list, account: Optional[str] = None, timeout: int = 30) -> str:
     """Run himalaya command, return stdout. Raise on non-zero exit."""
     cmd = ["himalaya"]
+    cmd.extend(args)
     if account:
         cmd.extend(["--account", account])
-    cmd.extend(args)
     cmd.append("--output")
     cmd.append("json")
 

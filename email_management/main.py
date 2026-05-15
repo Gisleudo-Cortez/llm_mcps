@@ -5,9 +5,7 @@ Provides tools for classifying emails, routing attachments, and
 processing inboxes — all using local himalaya + ollama, zero cloud
 by default.
 
-Cloud fallback (deepseek-v4-flash:cloud) is disabled by default.
-User must set `allow_cloud_fallback: true` in server_config.yaml
-to enable it.
+Cloud fallback (google/gemma-4-31b-it:free, deepseek-v4-flash) is enabled.
 """
 
 import shutil
@@ -19,7 +17,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 try:
-    from .classifier import classify_email
+    from .async_classifier import classify_email_async, classify_batch, ClassificationResult
     from .config import load_config, ServerConfig, AccountConfig
     from .himalaya_wrapper import (
         check_imap_connection,
@@ -29,7 +27,7 @@ try:
     )
     from .router import load_rules, RoutingResult
 except ImportError:
-    from classifier import classify_email
+    from async_classifier import classify_email_async, classify_batch, ClassificationResult
     from config import load_config, ServerConfig, AccountConfig
     from himalaya_wrapper import (
         check_imap_connection,
@@ -75,11 +73,11 @@ def _move_attachment(src: str, dest_dir: str, skip_existing: bool = True) -> Opt
     return str(dest_path)
 
 
-def _classify_and_route(acct: AccountConfig, msg_id: int, sender: str, recipient: str, subject: str, body: str) -> dict:
+async def _classify_and_route(acct: AccountConfig, msg_id: int, sender: str, recipient: str, subject: str, body: str) -> dict:
     """Classify an email and find its routing rule. Returns classification + routing dict."""
     cfg = _get_config()
 
-    cls = classify_email(
+    cls = await classify_email_async(
         sender=sender,
         recipient=recipient,
         subject=subject,
@@ -98,15 +96,56 @@ def _classify_and_route(acct: AccountConfig, msg_id: int, sender: str, recipient
         "confidence": cls.confidence,
         "needs_review": cls.needs_review,
         "model_used": cls.model_used,
+        "latency_ms": round(cls.latency_ms, 1),
         "routing_path": routing.expanded_path if routing else None,
         "action": routing.action if routing else "save",
-        "cloud_fallback_used": cls.model_used == "deepseek-v4-flash:cloud",
+        "cloud_fallback_used": cls.model_used in ("google/gemma-4-31b-it:free", "deepseek/deepseek-v4-flash"),
         "keyword_fallback_used": cls.model_used == "keyword-fallback",
     }
 
 
+async def _batch_classify_and_route(acct: AccountConfig, messages: list) -> list[dict]:
+    """Classify multiple emails concurrently and return routing results."""
+    cfg = _get_config()
+
+    emails = []
+    for msg in messages:
+        emails.append({
+            "sender": msg.sender,
+            "recipient": msg.recipient,
+            "subject": msg.subject,
+            "body": msg.body,
+        })
+
+    # Await batch classification
+    results = await classify_batch(
+        emails=emails,
+        classification_config=cfg.classification,
+    )
+
+    ruleset = load_rules(acct.rules_file)
+    output = []
+    for msg, cls in zip(messages, results):
+        routing: Optional[RoutingResult] = ruleset.match(msg.sender, msg.recipient)
+        output.append({
+            "id": msg.id,
+            "subject": msg.subject[:80],
+            "sender": msg.sender,
+            "label": cls.label,
+            "confidence": cls.confidence,
+            "needs_review": cls.needs_review,
+            "model_used": cls.model_used,
+            "latency_ms": round(cls.latency_ms, 1),
+            "routing_path": routing.expanded_path if routing else None,
+            "action": routing.action if routing else "save",
+            "cloud_fallback_used": cls.model_used in ("google/gemma-4-31b-it:free", "deepseek/deepseek-v4-flash"),
+            "keyword_fallback_used": cls.model_used == "keyword-fallback",
+        })
+    return output
+
+
 @mcp.tool()
-def filter_attachments(
+async def filter_attachments(
     account_name: str,
     folder: str = "INBOX",
     search_query: str = "",
@@ -134,14 +173,15 @@ def filter_attachments(
         search_query=search_query or None,
     )
 
-    results = []
+    # Collect emails with attachments
+    messages = []
     for env in envelopes:
         msg = read_message_body(acct.himalaya_account, env.id)
-        if not msg.has_attachments:
-            continue
+        if msg.has_attachments:
+            messages.append(msg)
 
-        result = _classify_and_route(acct, env.id, msg.sender, msg.recipient, msg.subject, msg.body)
-        results.append(result)
+    # Batch classify
+    results = await _batch_classify_and_route(acct, messages)
 
     return {
         "account": account_name,
@@ -153,7 +193,7 @@ def filter_attachments(
 
 
 @mcp.tool()
-def classify_email_tool(
+async def classify_email_tool(
     account_name: str,
     email_id: int,
 ) -> dict:
@@ -170,11 +210,11 @@ def classify_email_tool(
         return {"error": str(e)}
 
     msg = read_message_body(acct.himalaya_account, email_id)
-    return _classify_and_route(acct, email_id, msg.sender, msg.recipient, msg.subject, msg.body)
+    return await _classify_and_route(acct, email_id, msg.sender, msg.recipient, msg.subject, msg.body)
 
 
 @mcp.tool()
-def route_attachments(
+async def route_attachments(
     account_name: str,
     folder: str = "INBOX",
     search_query: str = "",
@@ -206,6 +246,16 @@ def route_attachments(
         search_query=search_query or None,
     )
 
+    # Collect emails with attachments
+    messages = []
+    for env in envelopes:
+        msg = read_message_body(acct.himalaya_account, env.id)
+        if msg.has_attachments:
+            messages.append(msg)
+
+    # Batch classify
+    results = await _batch_classify_and_route(acct, messages)
+
     routed = []
     skipped = []
     errored = []
@@ -216,13 +266,7 @@ def route_attachments(
     dl_dir = dl_root / datetime.now().strftime("%Y%m%d-%H%M%S")
     dl_dir.mkdir(parents=True, exist_ok=True)
 
-    for env in envelopes:
-        msg = read_message_body(acct.himalaya_account, env.id)
-        if not msg.has_attachments:
-            continue
-
-        result = _classify_and_route(acct, env.id, msg.sender, msg.recipient, msg.subject, msg.body)
-
+    for result in results:
         if result["cloud_fallback_used"]:
             cloud_fallback_count += 1
         if result["keyword_fallback_used"]:
@@ -230,7 +274,7 @@ def route_attachments(
 
         if result["routing_path"] is None:
             skipped.append({
-                "id": env.id,
+                "id": result["id"],
                 "subject": result["subject"],
                 "reason": "no matching rule",
             })
@@ -238,7 +282,7 @@ def route_attachments(
 
         if result["action"] == "archive-no-save":
             routed.append({
-                "id": env.id,
+                "id": result["id"],
                 "subject": result["subject"],
                 "label": result["label"],
                 "action": "archive-no-save",
@@ -247,7 +291,7 @@ def route_attachments(
 
         if dry_run:
             routed.append({
-                "id": env.id,
+                "id": result["id"],
                 "subject": result["subject"],
                 "label": result["label"],
                 "would_save_to": result["routing_path"],
@@ -257,7 +301,7 @@ def route_attachments(
 
         # Download and move
         try:
-            downloaded = download_attachments(acct.himalaya_account, env.id, str(dl_dir))
+            downloaded = download_attachments(acct.himalaya_account, result["id"], str(dl_dir))
             for filepath in downloaded:
                 final_path = _move_attachment(
                     filepath,
@@ -266,7 +310,7 @@ def route_attachments(
                 )
                 if final_path:
                     routed.append({
-                        "id": env.id,
+                        "id": result["id"],
                         "subject": result["subject"],
                         "file": Path(final_path).name,
                         "saved_to": final_path,
@@ -274,14 +318,14 @@ def route_attachments(
                     })
                 else:
                     skipped.append({
-                        "id": env.id,
+                        "id": result["id"],
                         "subject": result["subject"],
                         "file": Path(filepath).name,
                         "reason": "already exists at destination",
                     })
         except RuntimeError as e:
             errored.append({
-                "id": env.id,
+                "id": result["id"],
                 "subject": result["subject"],
                 "error": str(e),
             })
@@ -314,7 +358,7 @@ def route_attachments(
 
 
 @mcp.tool()
-def process_inbox(
+async def process_inbox(
     account_name: str,
     folder: str = "INBOX",
     page_size: int = 50,
@@ -328,7 +372,7 @@ def process_inbox(
 
     **OUTPUT EXPECTATION:** Same as route_attachments.
     """
-    return route_attachments(
+    return await route_attachments(
         account_name=account_name,
         folder=folder,
         page_size=page_size,

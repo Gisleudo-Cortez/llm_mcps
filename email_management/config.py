@@ -24,6 +24,8 @@ class ClassificationConfig:
     allow_cloud_fallback: bool = False
     confidence_threshold: float = 0.7
     max_preview_chars: int = 500
+    api_key: str = ""  # OpenRouter API key for cloud fallback
+    max_concurrent: int = 4  # Max concurrent classification requests
 
 
 @dataclass
@@ -94,6 +96,8 @@ def load_config(path: Optional[str] = None) -> ServerConfig:
         allow_cloud_fallback=cls_raw.get("allow_cloud_fallback", False),
         confidence_threshold=cls_raw.get("confidence_threshold", 0.7),
         max_preview_chars=cls_raw.get("max_preview_chars", 500),
+        api_key=cls_raw.get("api_key", ""),
+        max_concurrent=cls_raw.get("max_concurrent", 4),
     )
 
     # Attachments
