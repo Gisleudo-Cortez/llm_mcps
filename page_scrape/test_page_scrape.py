@@ -400,6 +400,22 @@ def test_fetch_ssrf_blocked_clean_message(mock_fetch):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SSRF: initial URL is validated before any HTTP request
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@patch("main.requests.get")
+def test_initial_url_validated_before_request(mock_get):
+    """SSRF blocks the initial URL before curl_cffi ever sends a request."""
+    from main import _fetch_with_redirect_control
+
+    with pytest.raises(ValueError, match="SSRF blocked"):
+        _fetch_with_redirect_control("http://127.0.0.1/")
+
+    # curl_cffi must NOT have been called — block happened before HTTP
+    mock_get.assert_not_called()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SSRF integration: redirect to internal IP is blocked
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -407,7 +423,8 @@ def test_fetch_ssrf_blocked_clean_message(mock_fetch):
 @patch("main._resolve_and_validate")
 @patch("main.requests.get")
 def test_redirect_to_internal_blocked(mock_get, mock_validate, mock_urljoin):
-    """A 301 redirect to 10.0.0.1 triggers SSRF block."""
+    """A 301 redirect to 10.0.0.1 triggers SSRF block on the redirect hop."""
+    # First response: safe public URL, 301 redirect to internal
     redirect_resp = _make_mock_response(
         url="http://safe.com",
         text="redirecting...",
@@ -416,9 +433,17 @@ def test_redirect_to_internal_blocked(mock_get, mock_validate, mock_urljoin):
     )
     mock_get.return_value = redirect_resp
     mock_urljoin.return_value = "http://10.0.0.1/secret"
-    mock_validate.side_effect = ValueError(
-        "SSRF blocked: 10.0.0.1 resolves to 10.0.0.1 which is in blocked range 10.0.0.0/8"
-    )
+
+    # _resolve_and_validate: pass for initial URL, block for redirect hop
+    def validate_side_effect(host):
+        if host == "10.0.0.1":
+            raise ValueError(
+                "SSRF blocked: 10.0.0.1 resolves to 10.0.0.1 "
+                "which is in blocked range 10.0.0.0/8"
+            )
+        return host  # safe.com passes
+
+    mock_validate.side_effect = validate_side_effect
 
     with pytest.raises(ValueError, match="SSRF blocked"):
         _fetch_with_redirect_control("http://safe.com")

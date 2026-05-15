@@ -276,6 +276,10 @@ def _fetch_with_redirect_control(
     current_url = url
     redirect_count = 0
 
+    # ── Validate initial URL before any HTTP request ──
+    initial_parsed = urllib.parse.urlparse(current_url)
+    _resolve_and_validate(initial_parsed.hostname)  # type: ignore[arg-type]
+
     # ── Initial fetch with retry ──
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries + 1):
