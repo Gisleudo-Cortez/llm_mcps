@@ -14,17 +14,63 @@ Features:
   - Retry with exponential backoff
 """
 
+import ipaddress
+import socket
 import time
 import urllib.parse
 from typing import Optional
 
-import requests
 import trafilatura
 from bs4 import BeautifulSoup
+from curl_cffi import requests
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
 mcp = FastMCP("page_scrape_mcp")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SSRF Defense-in-Depth — blocked networks
+# ═══════════════════════════════════════════════════════════════════════════
+_BLOCKED_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
+    ipaddress.ip_network("0.0.0.0/8"),       # Current network
+    ipaddress.ip_network("10.0.0.0/8"),      # Private
+    ipaddress.ip_network("100.64.0.0/10"),   # CGNAT
+    ipaddress.ip_network("127.0.0.0/8"),     # Loopback
+    ipaddress.ip_network("169.254.0.0/16"),  # Link-local / cloud metadata
+    ipaddress.ip_network("172.16.0.0/12"),   # Private
+    ipaddress.ip_network("192.0.0.0/24"),    # IETF protocol
+    ipaddress.ip_network("192.0.2.0/24"),    # TEST-NET-1
+    ipaddress.ip_network("192.168.0.0/16"),  # Private
+    ipaddress.ip_network("198.18.0.0/15"),   # Benchmark
+    ipaddress.ip_network("198.51.100.0/24"), # TEST-NET-2
+    ipaddress.ip_network("203.0.113.0/24"),  # TEST-NET-3
+    ipaddress.ip_network("224.0.0.0/4"),     # Multicast
+    ipaddress.ip_network("240.0.0.0/4"),     # Reserved / future
+]
+
+
+def _resolve_and_validate(host: str) -> str:
+    """Resolve hostname and validate IP is not internal/blocked.
+
+    Returns the resolved IP or raises ValueError.
+    """
+    try:
+        addr = socket.gethostbyname(host)
+    except socket.gaierror as e:
+        raise ValueError(f"DNS resolution failed for {host}: {e}") from e
+
+    ip = ipaddress.ip_address(addr)
+    for net in _BLOCKED_NETWORKS:
+        if ip in net:
+            raise ValueError(
+                f"SSRF blocked: {host} resolves to {addr} "
+                f"which is in blocked range {net}"
+            )
+    return addr
+
+
+# Max redirect hops before aborting
+_MAX_REDIRECTS: int = 10
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 1 Anti-Bot Headers (full evasion stack, not just 1 UA)
@@ -188,38 +234,85 @@ def _google_cache_url(url: str) -> str:
     return f"https://webcache.googleusercontent.com/search?q=cache:{url}"
 
 
-def _fetch(
+def _fetch_with_redirect_control(
     url: str,
     headers: Optional[dict[str, str]] = None,
     proxy: Optional[str] = None,
     max_retries: int = 1,
     timeout: int = 30,
 ) -> requests.Response:
-    """Fetch a URL with retry, backoff, and optional proxy."""
+    """Fetch a URL with manual redirect following, validating each hop."""
     if headers is None:
         headers = _build_headers()
 
-    proxies = None
+    proxies: dict[str, str] | None = None
     if proxy:
         proxies = {"http": proxy, "https": proxy}
 
+    current_url = url
+    redirect_count = 0
+
+    # ── Initial fetch with retry ──
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries + 1):
         try:
             if attempt > 0:
                 delay = 2**attempt  # 2s, 4s, 8s
                 time.sleep(delay)
-            resp = requests.get(url, headers=headers, proxies=proxies, timeout=timeout)
-            return resp
+            resp = requests.get(
+                current_url,
+                headers=headers,
+                proxies=proxies,
+                timeout=timeout,
+                impersonate="chrome131",
+                allow_redirects=False,
+            )
+            break
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             last_exc = e
+            if attempt == max_retries:
+                raise
             continue
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException:
             # Non-retryable (e.g. 400-level errors, invalid URL)
             raise
+    else:
+        # All retries exhausted
+        raise last_exc  # type: ignore[misc]
 
-    # All retries exhausted
-    raise last_exc  # type: ignore[misc]
+    # ── Manual redirect loop with SSRF validation ──
+    while resp.status_code in (301, 302, 303, 307, 308):
+        location = resp.headers.get("Location", "")
+        if not location:
+            break
+
+        # Resolve relative redirects
+        next_url = urllib.parse.urljoin(current_url, location)
+
+        # Validate redirect target — must not resolve to internal IP
+        parsed = urllib.parse.urlparse(next_url)
+        _resolve_and_validate(parsed.hostname)  # type: ignore[arg-type]
+
+        redirect_count += 1
+        if redirect_count > _MAX_REDIRECTS:
+            raise ValueError(f"Too many redirects ({_MAX_REDIRECTS})")
+
+        current_url = next_url
+        # One shot per redirect hop — no retry
+        resp = requests.get(
+            current_url,
+            headers=headers,
+            proxies=proxies,
+            timeout=timeout,
+            impersonate="chrome131",
+            allow_redirects=False,
+        )
+
+    # ── Validate final URL's IP (defense-in-depth) ──
+    final_parsed = urllib.parse.urlparse(resp.url or current_url)
+    _resolve_and_validate(final_parsed.hostname)  # type: ignore[arg-type]
+
+    return resp
 
 
 def _fetch_with_cache(
@@ -228,22 +321,22 @@ def _fetch_with_cache(
     headers: Optional[dict[str, str]] = None,
     proxy: Optional[str] = None,
     max_retries: int = 1,
-) -> str:
+) -> tuple[str, str]:
     """
     Fetch content, optionally via Google Cache.
 
-    Returns (html_content, final_url, source_label).
-
-    source_label is "live", "cache", or "cache" (fallback).
+    Returns (html_content, final_url).
     """
     if not use_cache:
-        resp = _fetch(url, headers=headers, proxy=proxy, max_retries=max_retries)
+        resp = _fetch_with_redirect_control(
+            url, headers=headers, proxy=proxy, max_retries=max_retries
+        )
         return resp.text, resp.url
 
     # Try cache first
     cache_url = _google_cache_url(url)
     try:
-        cache_resp = _fetch(
+        cache_resp = _fetch_with_redirect_control(
             cache_url,
             headers=headers,
             proxy=proxy,
@@ -257,11 +350,13 @@ def _fetch_with_cache(
             and ("web scraping" not in cache_html.lower() or "<html" in cache_html[:200])
         ):
             return cache_html, cache_resp.url
-    except requests.exceptions.RequestException:
-        pass  # Cache miss → fall through to live
+    except (requests.exceptions.RequestException, ValueError):
+        pass  # Cache miss or SSRF block → fall through to live
 
     # Fallback: live fetch
-    resp = _fetch(url, headers=headers, proxy=proxy, max_retries=max_retries)
+    resp = _fetch_with_redirect_control(
+        url, headers=headers, proxy=proxy, max_retries=max_retries
+    )
     return resp.text, resp.url
 
 

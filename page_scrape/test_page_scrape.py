@@ -7,67 +7,159 @@ sys.path.insert(0, os.path.dirname(__file__))
 from unittest.mock import MagicMock, patch
 import pytest
 
-from main import fetch_url_content, extract_links, _extract_tables, _extract_images
+from main import (
+    fetch_url_content, extract_links,
+    _extract_tables, _extract_images,
+    _resolve_and_validate, _BLOCKED_NETWORKS,
+    _fetch_with_redirect_control,
+    FetchUrlInput, ExtractLinksInput,
+)
 from bs4 import BeautifulSoup
 
 
-# ---------------------------------------------------------------------------
+# ── Mock helpers ────────────────────────────────────────────────────────────
+
+def _make_mock_response(
+    url="http://example.com",
+    text="<html><body><p>hi</p></body></html>",
+    status_code=200,
+    headers=None,
+):
+    """Factory for mock curl_cffi response objects."""
+    resp = MagicMock()
+    resp.url = url
+    resp.text = text
+    resp.status_code = status_code
+    resp.headers = headers or {}
+    return resp
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# _resolve_and_validate (SSRF layer)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def test_resolve_and_validate_blocks_loopback():
+    with pytest.raises(ValueError, match="SSRF blocked"):
+        _resolve_and_validate("127.0.0.1")
+
+
+def test_resolve_and_validate_blocks_private_10():
+    with pytest.raises(ValueError, match="SSRF blocked"):
+        _resolve_and_validate("10.0.0.1")
+
+
+def test_resolve_and_validate_blocks_192_168():
+    with pytest.raises(ValueError, match="SSRF blocked"):
+        _resolve_and_validate("192.168.1.1")
+
+
+def test_resolve_and_validate_blocks_link_local():
+    with pytest.raises(ValueError, match="SSRF blocked"):
+        _resolve_and_validate("169.254.169.254")
+
+
+def test_resolve_and_validate_blocks_metadata():
+    """localhost should resolve to 127.0.0.1 which is blocked."""
+    with pytest.raises(ValueError, match="SSRF blocked"):
+        _resolve_and_validate("localhost")
+
+
+def test_resolve_and_validate_allows_public():
+    """8.8.8.8 is a public DNS server — must pass validation."""
+    result = _resolve_and_validate("8.8.8.8")
+    assert result == "8.8.8.8"
+
+
+def test_blocked_networks_covers_all_private_ranges():
+    """Sanity: every key private range is in the blocked list."""
+    ranges = {str(n) for n in _BLOCKED_NETWORKS}
+    assert "10.0.0.0/8" in ranges
+    assert "127.0.0.0/8" in ranges
+    assert "192.168.0.0/16" in ranges
+    assert "172.16.0.0/12" in ranges
+    assert "169.254.0.0/16" in ranges
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # fetch_url_content
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def test_fetch_invalid_url():
-    result = fetch_url_content("not-a-url")
-    assert "Error" in result
-    assert "http" in result.lower()
+def test_fetch_invalid_url_schema():
+    """URLs without http/https scheme hit Pydantic validation first."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="pattern"):
+        FetchUrlInput(url="not-a-url")
 
 
-@patch("main.session")
-def test_fetch_timeout(mock_session):
-    import requests
-    mock_session.get.side_effect = requests.exceptions.Timeout()
-    result = fetch_url_content("http://example.com")
+def test_fetch_invalid_url_empty():
+    """URLs shorter than 8 chars hit Pydantic min_length."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="at least 8"):
+        FetchUrlInput(url="http://")
+
+
+@patch("main._fetch_with_redirect_control")
+def test_fetch_timeout(mock_fetch):
+    from curl_cffi import requests as cffi_requests
+    mock_fetch.side_effect = cffi_requests.exceptions.Timeout("timed out")
+    result = fetch_url_content(FetchUrlInput(url="http://example.com"))
     assert "timed out" in result.lower()
 
 
-@patch("main.session")
-def test_fetch_returns_sections(mock_session):
-    mock_resp = MagicMock()
-    mock_resp.url = "http://example.com"
-    mock_resp.status_code = 200
-    mock_resp.text = """
-    <html><head><title>Test</title></head>
-    <body><p>Hello world</p></body></html>
-    """
-    mock_resp.raise_for_status = MagicMock()
-    mock_session.get.return_value = mock_resp
+@patch("main._fetch_with_redirect_control")
+def test_fetch_connection_error(mock_fetch):
+    from curl_cffi import requests as cffi_requests
+    mock_fetch.side_effect = cffi_requests.exceptions.ConnectionError("refused")
+    result = fetch_url_content(FetchUrlInput(url="http://example.com"))
+    assert "Connection failed" in result
 
-    result = fetch_url_content("http://example.com")
+
+@patch("main._fetch_with_redirect_control")
+def test_fetch_returns_sections(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(
+        text="<html><head><title>Test</title></head><body><p>Hello world</p></body></html>"
+    )
+    result = fetch_url_content(FetchUrlInput(url="http://example.com"))
     assert "Page Metadata" in result
     assert "Main Content" in result
 
 
-@patch("main.session")
-def test_fetch_with_table(mock_session):
-    mock_resp = MagicMock()
-    mock_resp.url = "http://example.com"
-    mock_resp.status_code = 200
-    mock_resp.text = """
+@patch("main._fetch_with_redirect_control")
+def test_fetch_with_table_included(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(text="""
     <html><body>
     <table><thead><tr><th>Name</th><th>Age</th></tr></thead>
     <tbody><tr><td>Alice</td><td>30</td></tr></tbody>
     </table>
     </body></html>
-    """
-    mock_resp.raise_for_status = MagicMock()
-    mock_session.get.return_value = mock_resp
-
-    result = fetch_url_content("http://example.com", include_tables=True)
+    """)
+    result = fetch_url_content(FetchUrlInput(url="http://example.com", include_tables=True))
     assert "Tables" in result
 
 
-# ---------------------------------------------------------------------------
+@patch("main._fetch_with_redirect_control")
+def test_fetch_tables_disabled(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(text="""
+    <html><body>
+    <table><tr><td>hidden</td></tr></table>
+    </body></html>
+    """)
+    result = fetch_url_content(FetchUrlInput(url="http://example.com", include_tables=False))
+    assert "Tables" not in result
+
+
+@patch("main._fetch_with_redirect_control")
+def test_fetch_bot_challenge_detected(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(
+        text="<html><body>Just a moment... Cloudflare</body></html>"
+    )
+    result = fetch_url_content(FetchUrlInput(url="http://example.com"))
+    assert "bot-detection challenge" in result.lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # _extract_tables helper
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def test_extract_tables_basic():
     html = """
@@ -89,8 +181,8 @@ def test_extract_tables_respects_max_rows():
     html = f"<table><thead><tr><th>N</th></tr></thead><tbody>{rows}</tbody></table>"
     soup = BeautifulSoup(html, "lxml")
     tables = _extract_tables(soup, max_rows=5)
-    # Should have at most 5 data rows
-    assert tables[0].count("\n") <= 7  # header + sep + 5 rows
+    # header line + separator line + up to 5 data rows = 7
+    assert tables[0].count("\n") <= 7
 
 
 def test_extract_tables_empty():
@@ -99,9 +191,9 @@ def test_extract_tables_empty():
     assert tables == []
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
 # _extract_images helper
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def test_extract_images_resolves_relative_url():
     html = '<img src="/images/logo.png" alt="Logo">'
@@ -119,107 +211,149 @@ def test_extract_images_skips_empty_src():
     assert len(images) == 1
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
 # extract_links
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def test_extract_links_invalid_url():
-    result = extract_links("ftp://not-http.com")
-    assert "Error" in result
+    """URL without http scheme hits Pydantic validation."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="pattern"):
+        ExtractLinksInput(url="ftp://not-http.com")
 
 
-@patch("main.session")
-def test_extract_links_basic(mock_session):
-    mock_resp = MagicMock()
-    mock_resp.url = "http://example.com"
-    mock_resp.status_code = 200
-    mock_resp.text = """
+@patch("main._fetch_with_redirect_control")
+def test_extract_links_basic(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(text="""
     <html><body>
       <a href="/page1">Page 1</a>
       <a href="https://external.com/path">External</a>
       <a href="#anchor">Skip</a>
       <a href="mailto:x@y.com">Mail</a>
     </body></html>
-    """
-    mock_resp.raise_for_status = MagicMock()
-    mock_session.get.return_value = mock_resp
-
-    result = extract_links("http://example.com")
+    """)
+    result = extract_links(ExtractLinksInput(url="http://example.com"))
     assert "example.com" in result
     assert "external.com" in result
-    # anchor and mailto should be excluded
     assert "#anchor" not in result
     assert "mailto:" not in result
 
 
-@patch("main.session")
-def test_extract_links_internal_only(mock_session):
-    mock_resp = MagicMock()
-    mock_resp.url = "http://example.com"
-    mock_resp.status_code = 200
-    mock_resp.text = """
+@patch("main._fetch_with_redirect_control")
+def test_extract_links_internal_only(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(text="""
     <html><body>
       <a href="/internal">Internal</a>
       <a href="https://other.com/">External</a>
     </body></html>
-    """
-    mock_resp.raise_for_status = MagicMock()
-    mock_session.get.return_value = mock_resp
-
-    result = extract_links("http://example.com", internal_only=True)
+    """)
+    result = extract_links(ExtractLinksInput(
+        url="http://example.com", internal_only=True
+    ))
     assert "other.com" not in result
     assert "/internal" in result or "example.com/internal" in result
 
 
-@patch("main.session")
-def test_extract_links_filter_text(mock_session):
-    mock_resp = MagicMock()
-    mock_resp.url = "http://example.com"
-    mock_resp.status_code = 200
-    mock_resp.text = """
+@patch("main._fetch_with_redirect_control")
+def test_extract_links_filter_text(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(text="""
     <html><body>
       <a href="/api/users">API Users</a>
       <a href="/about">About</a>
     </body></html>
-    """
-    mock_resp.raise_for_status = MagicMock()
-    mock_session.get.return_value = mock_resp
-
-    result = extract_links("http://example.com", filter_text="/api/")
+    """)
+    result = extract_links(ExtractLinksInput(
+        url="http://example.com", filter_text="/api/"
+    ))
     assert "api/users" in result
     assert "/about" not in result
 
 
-@patch("main.session")
-def test_extract_links_deduplicates(mock_session):
-    mock_resp = MagicMock()
-    mock_resp.url = "http://example.com"
-    mock_resp.status_code = 200
-    mock_resp.text = """
+@patch("main._fetch_with_redirect_control")
+def test_extract_links_deduplicates(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(text="""
     <html><body>
       <a href="/page">Link 1</a>
       <a href="/page">Link 2 (duplicate)</a>
     </body></html>
-    """
-    mock_resp.raise_for_status = MagicMock()
-    mock_session.get.return_value = mock_resp
-
-    result = extract_links("http://example.com")
-    # /page should appear only once as a URL
+    """)
+    result = extract_links(ExtractLinksInput(url="http://example.com"))
     assert result.count("example.com/page") == 1
 
 
-@patch("main.session")
-def test_extract_links_no_links(mock_session):
-    mock_resp = MagicMock()
-    mock_resp.url = "http://example.com"
-    mock_resp.status_code = 200
-    mock_resp.text = "<html><body><p>No links here</p></body></html>"
-    mock_resp.raise_for_status = MagicMock()
-    mock_session.get.return_value = mock_resp
-
-    result = extract_links("http://example.com")
+@patch("main._fetch_with_redirect_control")
+def test_extract_links_no_links(mock_fetch):
+    mock_fetch.return_value = _make_mock_response(
+        text="<html><body><p>No links here</p></body></html>"
+    )
+    result = extract_links(ExtractLinksInput(url="http://example.com"))
     assert "No links found" in result
+
+
+@patch("main._fetch_with_redirect_control")
+def test_extract_links_respects_max_links(mock_fetch):
+    """Should cap output at max_links."""
+    links = "".join(f'<a href="/p{i}">Page {i}</a>' for i in range(10))
+    mock_fetch.return_value = _make_mock_response(
+        text=f"<html><body>{links}</body></html>"
+    )
+    result = extract_links(ExtractLinksInput(url="http://example.com", max_links=3))
+    # Only 3 links should appear
+    assert result.count("example.com/p") == 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SSRF integration: redirect to internal IP is blocked
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@patch("main.urllib.parse.urljoin")
+@patch("main._resolve_and_validate")
+@patch("main.requests.get")
+def test_redirect_to_internal_blocked(mock_get, mock_validate, mock_urljoin):
+    """A 301 redirect to 10.0.0.1 triggers SSRF block."""
+    redirect_resp = _make_mock_response(
+        url="http://safe.com",
+        text="redirecting...",
+        status_code=301,
+        headers={"Location": "http://10.0.0.1/secret"},
+    )
+    mock_get.return_value = redirect_resp
+    mock_urljoin.return_value = "http://10.0.0.1/secret"
+    mock_validate.side_effect = ValueError(
+        "SSRF blocked: 10.0.0.1 resolves to 10.0.0.1 which is in blocked range 10.0.0.0/8"
+    )
+
+    with pytest.raises(ValueError, match="SSRF blocked"):
+        _fetch_with_redirect_control("http://safe.com")
+
+
+@patch("main._resolve_and_validate")
+@patch("main.requests.get")
+def test_final_url_validated_even_without_redirect(mock_get, mock_validate):
+    """Even non-redirect responses get their final URL validated."""
+    mock_get.return_value = _make_mock_response(
+        url="http://normal.com/page",
+        text="<html><body>ok</body></html>",
+    )
+    # Should call _resolve_and_validate for the parsed host
+    _fetch_with_redirect_control("http://normal.com/page")
+    mock_validate.assert_called_with("normal.com")
+
+
+@patch("main.urllib.parse.urljoin")
+@patch("main._resolve_and_validate")
+@patch("main.requests.get")
+def test_too_many_redirects_raises(mock_get, mock_validate, mock_urljoin):
+    """After _MAX_REDIRECTS hops, abort."""
+    redirect_resp = _make_mock_response(
+        status_code=301,
+        headers={"Location": "http://next.example.com/"},
+    )
+    mock_get.return_value = redirect_resp
+    mock_urljoin.return_value = "http://next.example.com/"
+
+    with pytest.raises(ValueError, match="Too many redirects"):
+        _fetch_with_redirect_control("http://start.example.com/")
 
 
 if __name__ == "__main__":
