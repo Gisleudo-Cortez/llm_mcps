@@ -1,0 +1,6 @@
+[project]
+name = "brave-search"
+version = "0.1.0"
+description = "MCP tools for Brave Search API — web and news search with Goggles support"
+requires-python = ">=3.13"
+dependencies = ["mcp>=1.27.0", "requests>=2.32.0"]

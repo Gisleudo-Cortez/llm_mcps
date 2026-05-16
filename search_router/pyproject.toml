@@ -1,0 +1,8 @@
+[project]
+name = "search-router"
+version = "0.1.0"
+description = "MCP tool that returns per-intent routing configs for the Brave+Exa+SearXNG+Crawl4AI search system"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp>=1.27.0",
+]

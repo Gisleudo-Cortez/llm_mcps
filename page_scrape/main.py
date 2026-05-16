@@ -14,11 +14,14 @@ Features:
   - Retry with exponential backoff
 """
 
+import concurrent.futures
 import ipaddress
 import json
+import os
 import socket
 import time
 import urllib.parse
+import urllib.request as _urllib_req
 from typing import Optional
 
 import trafilatura
@@ -787,6 +790,234 @@ def extract_links(params: ExtractLinksInput) -> str:  # type: ignore[no-untyped-
         return f"Error: SSRF blocked — {e}"
     except Exception as e:
         return f"Error: An unexpected error occurred — {e}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Crawl4AI Docker Integration — full-browser extraction for JS-rendered pages
+# Docker image: unclecode/crawl4ai:latest  Port: 11235 (default)
+# Start: docker run -d --name crawl4ai -p 11235:11235 unclecode/crawl4ai:latest
+# ═══════════════════════════════════════════════════════════════════════════
+
+CRAWL4AI_URL = os.getenv("CRAWL4AI_URL", "http://localhost:11235")
+_CRAWL4AI_POLL_INTERVAL: float = 1.5   # seconds between task status polls
+_CRAWL4AI_MAX_POLLS: int = 40          # 60-second ceiling per URL
+
+
+def _c4ai_post(path: str, body: dict, timeout: int = 15) -> dict:
+    data = json.dumps(body).encode()
+    req = _urllib_req.Request(
+        f"{CRAWL4AI_URL}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with _urllib_req.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _c4ai_get(path: str, timeout: int = 10) -> dict:
+    with _urllib_req.urlopen(f"{CRAWL4AI_URL}{path}", timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _c4ai_submit(url: str, cache_mode: str) -> str:
+    """Submit one URL to Crawl4AI as an async task; return the task_id."""
+    payload = {
+        "urls": [url],
+        "browser_config": {
+            "type": "BrowserConfig",
+            "params": {"headless": True, "verbose": False},
+        },
+        "crawler_config": {
+            "type": "CrawlerRunConfig",
+            "params": {
+                "cache_mode": cache_mode,
+                "word_count_threshold": 10,
+            },
+        },
+    }
+    result = _c4ai_post("/crawl", payload)
+    task_id = result.get("task_id")
+    if not task_id:
+        raise RuntimeError(f"Crawl4AI returned no task_id — response: {result}")
+    return task_id
+
+
+def _c4ai_poll(task_id: str) -> dict:
+    """Block-poll until the task is done or times out; return the result dict."""
+    for _ in range(_CRAWL4AI_MAX_POLLS):
+        time.sleep(_CRAWL4AI_POLL_INTERVAL)
+        data = _c4ai_get(f"/task/{task_id}")
+        status = data.get("status")
+        if status == "completed":
+            return data.get("result", {})
+        if status == "failed":
+            raise RuntimeError(
+                f"Crawl4AI task failed: {data.get('error', 'unknown error')}"
+            )
+    max_wait = _CRAWL4AI_MAX_POLLS * _CRAWL4AI_POLL_INTERVAL
+    raise TimeoutError(f"Task {task_id} did not complete within {max_wait:.0f}s")
+
+
+def _c4ai_extract_markdown(result: dict) -> str:
+    """Pull fit_markdown from the result; handles v0.3 (flat) and v0.4+ (nested) shapes."""
+    md = result.get("markdown")
+    if isinstance(md, dict):
+        return md.get("fit_markdown") or md.get("raw_markdown") or ""
+    if isinstance(md, str) and md:
+        return md
+    return result.get("fit_markdown") or ""
+
+
+def _c4ai_fetch_one(url: str, use_cache: bool) -> tuple[str, str]:
+    """Fetch a single URL; return (url, fit_markdown_or_error_string)."""
+    cache_mode = "enabled" if use_cache else "bypass"
+    try:
+        task_id = _c4ai_submit(url, cache_mode)
+        result = _c4ai_poll(task_id)
+        if not result.get("success"):
+            code = result.get("status_code", "?")
+            return url, f"Error: HTTP {code} — page fetch failed"
+        content = _c4ai_extract_markdown(result)
+        if not content:
+            return url, "Warning: Crawl4AI returned empty markdown for this page"
+        return url, content
+    except Exception as exc:
+        return url, f"Error: {exc}"
+
+
+_CRAWL4AI_DOCKER_HINT = (
+    "Is the container running? Start it with:\n"
+    "  docker run -d --name crawl4ai -p 11235:11235 unclecode/crawl4ai:latest\n"
+    "Override URL with the CRAWL4AI_URL environment variable."
+)
+
+
+@mcp.tool(
+    name="page_scrape_crawl4ai_fetch",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+def crawl4ai_fetch(url: str, use_cache: bool = False) -> str:
+    """
+    Fetch one URL via Crawl4AI Docker and return clean fit_markdown.
+
+    **TRIGGER CONDITION:** Use when you have a specific URL to read in full and need
+    noise-free markdown — especially for JavaScript-rendered pages, React/Vue/VitePress
+    documentation sites, or any page that page_scrape_fetch_url_content fails to extract
+    correctly (empty content, JS-only rendering). Requires Crawl4AI Docker running at
+    CRAWL4AI_URL (default http://localhost:11235).
+
+    **SEQUENCE GUIDANCE:** Call after a search engine returns a URL you want to read
+    completely. For multiple URLs from the same session, prefer
+    page_scrape_crawl4ai_fetch_many to fetch them in parallel. For simple static HTML
+    pages, page_scrape_fetch_url_content is faster (no Docker round-trip overhead).
+
+    **CONSTRAINT WARNING:**
+      - Crawl4AI Docker must be running (see DOCKER SETUP below if it is not)
+      - Per-URL timeout ceiling is 60 seconds; heavy JS sites may approach this
+      - use_cache=True stores the crawled page in Crawl4AI's session cache; enable
+        for pages you may revisit in the same research session to skip re-crawling
+
+    **DOCKER SETUP (if container is not running):**
+      docker run -d --name crawl4ai -p 11235:11235 unclecode/crawl4ai:latest
+
+    **OUTPUT EXPECTATION:** fit_markdown — prose stripped of navigation, footers, ads,
+    and boilerplate. Better signal-to-noise than raw_markdown for LLM context windows.
+
+    Args:
+        url: Target URL (must start with http:// or https://)
+        use_cache: Cache the page in Crawl4AI's local store. Enable when you may revisit
+                   this URL in the same session. Default False (always re-crawl).
+    """
+    if not url.startswith(("http://", "https://")):
+        return "Error: URL must start with http:// or https://"
+
+    try:
+        _, content = _c4ai_fetch_one(url, use_cache)
+        cache_tag = " [cache: enabled]" if use_cache else ""
+        return f"### Crawl4AI — {url}{cache_tag}\n\n{content}"
+    except Exception as exc:
+        return f"Error calling Crawl4AI Docker: {exc}\n\n{_CRAWL4AI_DOCKER_HINT}"
+
+
+@mcp.tool(
+    name="page_scrape_crawl4ai_fetch_many",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+def crawl4ai_fetch_many(urls: list[str], use_cache: bool = True) -> str:
+    """
+    Fetch multiple URLs in parallel via Crawl4AI Docker; returns fit_markdown for each.
+
+    **TRIGGER CONDITION:** Use when you have a list of URLs to read from the same
+    documentation site, search result set, or multi-page research workflow. All URLs
+    are submitted as concurrent Crawl4AI tasks — wall time equals the slowest URL,
+    not the sum. Requires Crawl4AI Docker running at CRAWL4AI_URL (default localhost:11235).
+
+    **SEQUENCE GUIDANCE — documentation multi-page workflow:**
+    1. Use Brave (q="<topic> site:<docs_domain>") to discover relevant sub-pages
+    2. Collect URLs from Brave results
+    3. Pass the URL list to this tool → receive all pages as clean markdown in one call
+    4. Synthesize across extracted pages
+
+    Enable use_cache=True (default for this tool) so repeated calls in the same session
+    serve from Crawl4AI's local cache, avoiding redundant re-crawls.
+
+    **CONSTRAINT WARNING:**
+      - Max 10 URLs per call — prevents memory overload on the local Docker container
+      - Crawl4AI Docker must be running (see DOCKER SETUP below)
+      - Failed URLs report their error inline; partial results are always returned
+      - All tasks run concurrently; heavy pages may take up to 60 seconds each
+
+    **DOCKER SETUP (if container is not running):**
+      docker run -d --name crawl4ai -p 11235:11235 unclecode/crawl4ai:latest
+
+    **OUTPUT EXPECTATION:** One section per URL, ordered by input order, prefixed with
+    [OK] or [FAILED] and the URL. Failed URLs include the error message inline.
+
+    Args:
+        urls: 1–10 URLs to fetch (each must start with http:// or https://)
+        use_cache: Cache pages in Crawl4AI's local store. Default True for multi-URL
+                   fetches since revisiting pages is common in documentation research.
+    """
+    if not urls:
+        return "Error: urls list is empty."
+    if len(urls) > 10:
+        return "Error: Max 10 URLs per call — split into multiple batches if needed."
+
+    invalid = [u for u in urls if not u.startswith(("http://", "https://"))]
+    if invalid:
+        return f"Error: Invalid URLs (must start with http:// or https://): {invalid}"
+
+    try:
+        workers = min(len(urls), 5)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_url = {
+                pool.submit(_c4ai_fetch_one, url, use_cache): url for url in urls
+            }
+            results: dict[str, str] = {}
+            for future in concurrent.futures.as_completed(future_to_url):
+                url, content = future.result()
+                results[url] = content
+    except Exception as exc:
+        return f"Error calling Crawl4AI Docker: {exc}\n\n{_CRAWL4AI_DOCKER_HINT}"
+
+    sections = []
+    for url in urls:  # preserve input order
+        content = results.get(url, "Error: no result returned")
+        status = "FAILED" if content.startswith("Error") else "OK"
+        sections.append(f"### [{status}] {url}\n\n{content}")
+
+    return "\n\n---\n\n".join(sections)
 
 
 if __name__ == "__main__":

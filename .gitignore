@@ -6,3 +6,12 @@ __pycache__/
 *.egg-info/
 chroma_db/
 garmin_mcp/
+crawl4ai/
+
+# Secrets — never commit
+.env
+.env.local
+*.env
+
+# Logs
+*.log
