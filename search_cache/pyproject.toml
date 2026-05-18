@@ -1,0 +1,17 @@
+[project]
+name = "search-cache"
+version = "0.1.0"
+description = "Semantic search cache MCP server — reduces agent API usage via two-layer lookup with staleness scoring"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "lancedb>=0.20",
+    "mcp>=1.27.0",
+    "pyarrow>=18.0",
+    "sentence-transformers>=3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

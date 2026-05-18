@@ -62,7 +62,7 @@ def brave_search_web(
     (goggles_id, freshness, count) for the current intent. Pass them directly to this tool.
     For verification intent: call this AND `brave_search_news` in parallel with the same query.
     For tool_development intent: call `searxng_web_search` first; use this as a fallback.
-    For price intent (BR): set country="BR", search_lang="pt".
+    For price intent (BR): set country="BR", search_lang="pt-br".
 
     **CONSTRAINT WARNING:** Requires BRAVE_API_KEY env var. Max count=20 per call. The
     `goggles_id` must be a raw URL to a hosted Goggle file (GitHub Gist raw URL). Rate limits
@@ -76,7 +76,7 @@ def brave_search_web(
         query: Search query. Use specific terms; quote exact phrases with double-quotes.
         count: Number of results (1–20).
         country: Two-letter country code for regional results (e.g., "US", "BR", "GB").
-        search_lang: Language code for results (e.g., "en", "pt", "es").
+        search_lang: Language code for results (e.g., "en", "pt-br", "es").
         freshness: Recency filter — "pd" (24h), "pw" (week), "pm" (month), "py" (year),
                    or "YYYY-MM-DDtoYYYY-MM-DD" for a custom date range.
         extra_snippets: Return up to 5 extra passage snippets per result (more context, more tokens).
@@ -163,7 +163,7 @@ def brave_search_news(
         query: News search query. Include time-relevant terms or year for precision.
         count: Number of articles (1–20).
         country: Two-letter country code.
-        search_lang: Language code (e.g., "en", "pt").
+        search_lang: Language code (e.g., "en", "pt-br").
         freshness: Recency filter — "pd" (24h), "pw" (week), "pm" (month), "py" (year).
         extra_snippets: Return extra passage snippets per result.
     """

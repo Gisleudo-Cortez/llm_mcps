@@ -14,7 +14,6 @@ Features:
   - Retry with exponential backoff
 """
 
-import concurrent.futures
 import ipaddress
 import json
 import os
@@ -796,14 +795,20 @@ def extract_links(params: ExtractLinksInput) -> str:  # type: ignore[no-untyped-
 # Crawl4AI Docker Integration — full-browser extraction for JS-rendered pages
 # Docker image: unclecode/crawl4ai:latest  Port: 11235 (default)
 # Start: docker run -d --name crawl4ai -p 11235:11235 unclecode/crawl4ai:latest
+#
+# Crawl4AI v0.8.x API (May 2026):
+#   /md   — single URL, sync, returns {url, markdown, success, filter}
+#   /crawl — batch (urls=[...]), sync, returns {success, results: [...]}
+#   Results in /crawl nest markdown as dict: {fit_markdown, raw_markdown, ...}
 # ═══════════════════════════════════════════════════════════════════════════
 
 CRAWL4AI_URL = os.getenv("CRAWL4AI_URL", "http://localhost:11235")
-_CRAWL4AI_POLL_INTERVAL: float = 1.5   # seconds between task status polls
-_CRAWL4AI_MAX_POLLS: int = 40          # 60-second ceiling per URL
+_CRAWL4AI_TIMEOUT: int = 120  # per-request ceiling for heavy JS pages
 
 
-def _c4ai_post(path: str, body: dict, timeout: int = 15) -> dict:
+def _c4ai_post(path: str, body: dict, timeout: int | None = None) -> dict:
+    """POST to Crawl4AI, return parsed JSON."""
+    t = timeout if timeout is not None else _CRAWL4AI_TIMEOUT
     data = json.dumps(body).encode()
     req = _urllib_req.Request(
         f"{CRAWL4AI_URL}{path}",
@@ -811,79 +816,66 @@ def _c4ai_post(path: str, body: dict, timeout: int = 15) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with _urllib_req.urlopen(req, timeout=timeout) as resp:
+    with _urllib_req.urlopen(req, timeout=t) as resp:
         return json.loads(resp.read())
-
-
-def _c4ai_get(path: str, timeout: int = 10) -> dict:
-    with _urllib_req.urlopen(f"{CRAWL4AI_URL}{path}", timeout=timeout) as resp:
-        return json.loads(resp.read())
-
-
-def _c4ai_submit(url: str, cache_mode: str) -> str:
-    """Submit one URL to Crawl4AI as an async task; return the task_id."""
-    payload = {
-        "urls": [url],
-        "browser_config": {
-            "type": "BrowserConfig",
-            "params": {"headless": True, "verbose": False},
-        },
-        "crawler_config": {
-            "type": "CrawlerRunConfig",
-            "params": {
-                "cache_mode": cache_mode,
-                "word_count_threshold": 10,
-            },
-        },
-    }
-    result = _c4ai_post("/crawl", payload)
-    task_id = result.get("task_id")
-    if not task_id:
-        raise RuntimeError(f"Crawl4AI returned no task_id — response: {result}")
-    return task_id
-
-
-def _c4ai_poll(task_id: str) -> dict:
-    """Block-poll until the task is done or times out; return the result dict."""
-    for _ in range(_CRAWL4AI_MAX_POLLS):
-        time.sleep(_CRAWL4AI_POLL_INTERVAL)
-        data = _c4ai_get(f"/task/{task_id}")
-        status = data.get("status")
-        if status == "completed":
-            return data.get("result", {})
-        if status == "failed":
-            raise RuntimeError(
-                f"Crawl4AI task failed: {data.get('error', 'unknown error')}"
-            )
-    max_wait = _CRAWL4AI_MAX_POLLS * _CRAWL4AI_POLL_INTERVAL
-    raise TimeoutError(f"Task {task_id} did not complete within {max_wait:.0f}s")
 
 
 def _c4ai_extract_markdown(result: dict) -> str:
-    """Pull fit_markdown from the result; handles v0.3 (flat) and v0.4+ (nested) shapes."""
+    """Pull markdown from a result dict — handles three shapes:
+
+    1. /md response:   {markdown: "..."} (flat string)
+    2. /crawl result:  {markdown: {fit_markdown, raw_markdown, ...}} (dict)
+    3. Older shapes:   {fit_markdown: "..."}
+    """
     md = result.get("markdown")
     if isinstance(md, dict):
         return md.get("fit_markdown") or md.get("raw_markdown") or ""
-    if isinstance(md, str) and md:
+    if isinstance(md, str) and md.strip():
         return md
+    # Fallback: direct fit_markdown key (older versions)
     return result.get("fit_markdown") or ""
 
 
-def _c4ai_fetch_one(url: str, use_cache: bool) -> tuple[str, str]:
-    """Fetch a single URL; return (url, fit_markdown_or_error_string)."""
-    cache_mode = "enabled" if use_cache else "bypass"
+def _c4ai_fetch_single(url: str, use_cache: bool) -> tuple[str, str]:
+    """Fetch one URL via /md (synchronous, clean markdown). Returns (url, content_or_error)."""
+    payload = {"url": url, "f": "fit"}
     try:
-        task_id = _c4ai_submit(url, cache_mode)
-        result = _c4ai_poll(task_id)
-        if not result.get("success"):
-            code = result.get("status_code", "?")
-            return url, f"Error: HTTP {code} — page fetch failed"
-        content = _c4ai_extract_markdown(result)
+        data = _c4ai_post("/md", payload)
+        if not data.get("success"):
+            err = data.get("error", "unknown error")
+            return url, f"Error: Crawl4AI /md failed — {err}"
+        content = _c4ai_extract_markdown(data)
         if not content:
             return url, "Warning: Crawl4AI returned empty markdown for this page"
         return url, content
     except Exception as exc:
         return url, f"Error: {exc}"
+
+
+def _c4ai_fetch_batch(urls: list[str], use_cache: bool) -> dict[str, str]:
+    """Fetch multiple URLs via /crawl (sync batch). Returns {url: content_or_error}."""
+    payload: dict = {"urls": urls}
+    try:
+        data = _c4ai_post("/crawl", payload)
+        results = data.get("results", [])
+        out: dict[str, str] = {}
+        for item in results:
+            item_url = item.get("url", "")
+            if not item.get("success"):
+                code = item.get("status_code", "?")
+                err = item.get("error_message", "fetch failed")
+                out[item_url] = f"Error: HTTP {code} — {err}"
+            else:
+                content = _c4ai_extract_markdown(item)
+                out[item_url] = content or "Warning: Crawl4AI returned empty markdown"
+        # Fill in any URLs missing from results
+        for u in urls:
+            if u not in out:
+                out[u] = "Error: no result returned for this URL"
+        return out
+    except Exception as exc:
+        # All URLs get the same error if the batch call itself failed
+        return {u: f"Error: {exc}" for u in urls}
 
 
 _CRAWL4AI_DOCKER_HINT = (
@@ -938,7 +930,7 @@ def crawl4ai_fetch(url: str, use_cache: bool = False) -> str:
         return "Error: URL must start with http:// or https://"
 
     try:
-        _, content = _c4ai_fetch_one(url, use_cache)
+        _, content = _c4ai_fetch_single(url, use_cache)
         cache_tag = " [cache: enabled]" if use_cache else ""
         return f"### Crawl4AI — {url}{cache_tag}\n\n{content}"
     except Exception as exc:
@@ -999,15 +991,7 @@ def crawl4ai_fetch_many(urls: list[str], use_cache: bool = True) -> str:
         return f"Error: Invalid URLs (must start with http:// or https://): {invalid}"
 
     try:
-        workers = min(len(urls), 5)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_url = {
-                pool.submit(_c4ai_fetch_one, url, use_cache): url for url in urls
-            }
-            results: dict[str, str] = {}
-            for future in concurrent.futures.as_completed(future_to_url):
-                url, content = future.result()
-                results[url] = content
+        results = _c4ai_fetch_batch(urls, use_cache)
     except Exception as exc:
         return f"Error calling Crawl4AI Docker: {exc}\n\n{_CRAWL4AI_DOCKER_HINT}"
 

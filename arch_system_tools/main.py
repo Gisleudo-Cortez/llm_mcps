@@ -21,8 +21,8 @@ mcp = FastMCP("arch_mcp")
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def list_directory(path: str = ".") -> str:
     """
@@ -67,8 +67,8 @@ def list_directory(path: str = ".") -> str:
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def read_file(file_path: str, max_lines: int = 1000) -> str:
     """
@@ -117,8 +117,8 @@ def read_file(file_path: str, max_lines: int = 1000) -> str:
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def search_contents(pattern: str, path: str = ".", max_matches: int = 100) -> str:
     """
@@ -148,7 +148,8 @@ def search_contents(pattern: str, path: str = ".", max_matches: int = 100) -> st
             "ugrep",
             "-rnI",  # r: recursive, n: line numbers, I: ignore binaries
             "--color=never",
-            "-m", str(max_matches),
+            "-m",
+            str(max_matches),
             pattern,
             path,
         ]
@@ -158,7 +159,8 @@ def search_contents(pattern: str, path: str = ".", max_matches: int = 100) -> st
             "-rn",
             "--color=never",
             "--binary-files=without-match",
-            "-m", str(max_matches),
+            "-m",
+            str(max_matches),
             pattern,
             path,
         ]
@@ -172,8 +174,8 @@ def search_contents(pattern: str, path: str = ".", max_matches: int = 100) -> st
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def query_packages(
     manager: Literal["pacman", "paru"],
@@ -225,8 +227,8 @@ def query_packages(
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def git_operations(
     operation: Literal["status", "diff", "log", "show", "blame"],
@@ -305,8 +307,8 @@ def git_operations(
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def systemd_logs(service: str = "", lines: int = 50, boot_only: bool = True) -> str:
     """
@@ -360,8 +362,8 @@ def systemd_logs(service: str = "", lines: int = 50, boot_only: bool = True) -> 
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def calculate(query: str) -> str:
     """
@@ -404,8 +406,8 @@ def calculate(query: str) -> str:
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def get_system_info(
     target: Literal["os", "hardware", "desktop", "resources", "all"] = "all",
@@ -464,8 +466,8 @@ def get_system_info(
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def process_monitor(sort_by: Literal["cpu", "memory"] = "cpu", limit: int = 20) -> str:
     """
@@ -508,8 +510,8 @@ def process_monitor(sort_by: Literal["cpu", "memory"] = "cpu", limit: int = 20) 
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def network_diagnostics(
     target: Literal["ports", "interfaces", "routes"] = "ports",
@@ -549,8 +551,8 @@ def network_diagnostics(
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def service_status(service_name: str) -> str:
     """
@@ -590,8 +592,8 @@ def service_status(service_name: str) -> str:
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def container_status(
     operation: Literal["list", "stats", "logs"] = "list",
@@ -614,13 +616,19 @@ def container_status(
     """
     if operation == "list":
         cmd = [
-            "docker", "ps", "-a",
-            "--format", "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}",
+            "docker",
+            "ps",
+            "-a",
+            "--format",
+            "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}",
         ]
     elif operation == "stats":
         cmd = [
-            "docker", "stats", "--no-stream",
-            "--format", "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}",
+            "docker",
+            "stats",
+            "--no-stream",
+            "--format",
+            "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}",
         ]
     elif operation == "logs":
         if not container_name:
@@ -641,8 +649,8 @@ def container_status(
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def scheduled_tasks(all_timers: bool = False) -> str:
     """
@@ -673,8 +681,8 @@ def scheduled_tasks(all_timers: bool = False) -> str:
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def inspect_environment(specific_var: str = "") -> str:
     """
@@ -711,8 +719,8 @@ def inspect_environment(specific_var: str = "") -> str:
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
-        "openWorldHint": False
-}
+        "openWorldHint": False,
+    },
 )
 def test_connectivity(host: str, method: Literal["ping", "http"] = "ping") -> str:
     """

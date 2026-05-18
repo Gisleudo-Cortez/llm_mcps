@@ -85,7 +85,7 @@ def _build_contents(
 )
 def exa_search_query(
     query: str,
-    search_type: str = "neural",
+    search_type: str = "auto",
     num_results: int = 5,
     include_domains: Optional[list[str]] = None,
     exclude_domains: Optional[list[str]] = None,
@@ -96,6 +96,7 @@ def exa_search_query(
     highlight_query: Optional[str] = None,
     num_sentences: int = 3,
     highlights_per_result: int = 3,
+    category: Optional[str] = None,
 ) -> str:
     """
     Search the web using Exa's neural semantic search or keyword search.
@@ -113,10 +114,20 @@ def exa_search_query(
     - tool_development intent → keyword type, called after SearXNG and Brave as a third step.
     - verification intent (scientific) → neural supplement after Brave parallel calls.
 
+    **SEARCH TYPES:**
+    - auto (default, ~1s): Best general-purpose search, automatically selects optimal strategy
+    - instant (~250ms): Fastest, for real-time apps like chat/voice
+    - fast (~450ms): Speed with minimal quality sacrifice
+    - neural: Semantic similarity search (original Exa behavior)
+    - keyword: Exact-term matching for precise identifiers
+    - deep-lite (~4s): Lightweight synthesized search with structured outputs
+    - deep (~4-15s): Multi-step reasoning for complex queries with structured outputs
+    - deep-reasoning (~12-40s): Highest-quality synthesized output for hardest research tasks
+
     **CONSTRAINT WARNING:** Requires EXA_API_KEY env var. Neural search costs more credits than
     keyword. `include_text=True` returns full page content — very high token cost; use only when
     highlights are insufficient. `include_domains` and `exclude_domains` are mutually exclusive
-    in practice — do not combine them.
+    in practice — do not combine them. Max 100 results for neural/deep search types.
 
     **OUTPUT EXPECTATION:** Returns results with title, URL, published date, and highlighted
     passage excerpts most relevant to the query. If `include_text=True`, full page text is
@@ -126,8 +137,8 @@ def exa_search_query(
     Args:
         query: The search query. For neural mode, phrase as a natural language concept or
                question. For keyword mode, use exact technical terms.
-        search_type: "neural" for semantic similarity, "keyword" for exact-term matching.
-        num_results: Number of results to return (1–10; higher costs more credits).
+        search_type: One of: auto, instant, fast, neural, keyword, deep-lite, deep, deep-reasoning.
+        num_results: Number of results to return (1–100; higher costs more credits).
         include_domains: Restrict results to these domains (e.g., ["arxiv.org", "docs.python.org"]).
         exclude_domains: Exclude these domains from results.
         start_published_date: Only return pages published after this ISO date (e.g., "2024-01-01").
@@ -138,6 +149,8 @@ def exa_search_query(
                          query is broad but you want highlights focused on a specific sub-topic.
         num_sentences: Sentences per highlight passage (1–5).
         highlights_per_result: Number of highlight passages per result (1–5).
+        category: Optional content category filter: "company", "people", "news", "paper",
+                  "tweet", "github", "blog", "pdf", etc.
     """
     body: dict = {
         "query": query,
@@ -152,6 +165,8 @@ def exa_search_query(
         body["startPublishedDate"] = start_published_date
     if end_published_date:
         body["endPublishedDate"] = end_published_date
+    if category:
+        body["category"] = category
 
     contents = _build_contents(
         include_highlights, highlight_query, num_sentences, highlights_per_result, include_text

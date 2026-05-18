@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A collection of independent MCP (Model Context Protocol) servers built with [FastMCP](https://github.com/jlowin/fastmcp). Each subdirectory is a self-contained Python project with its own virtual environment managed by `uv`. Servers are registered in `~/.lmstudio/mcp.json`.
+A collection of independent MCP (Model Context Protocol) servers built with [FastMCP](https://github.com/jlowin/fastmcp). Each subdirectory is a self-contained Python project with its own virtual environment managed by `uv`. Servers are registered via `claude mcp add --scope user` (user-global scope).
 
 ## Project Structure
 
 | Directory | Server Name | Purpose |
 |-----------|-------------|---------|
+| `search_cache/` | Search Cache | Local semantic cache for agent search results — two-layer lookup (hash + ANN), 7-tier staleness scoring, LCFU eviction (LanceDB + SentenceTransformers) |
 | `email_management/` | Email Management | Classify emails, route attachments, process inboxes using himalaya + local LLMs |
 | `page_scrape/` | Page Scrape Server | Fetch/parse web pages; extract links for site mapping (Trafilatura + BeautifulSoup) |
 | `rag_tools/` | RAG Document Tools | Document reading, indexing, and semantic search (ChromaDB + SentenceTransformers) |

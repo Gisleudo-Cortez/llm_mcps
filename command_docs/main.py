@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from enum import Enum
+from functools import lru_cache
 from typing import Literal
 
 import requests
@@ -127,6 +128,41 @@ def _format_response(text: str, heading: str, response_format: _ResponseFormat) 
     return _json.dumps({"heading": heading, "content": text}, indent=2, ensure_ascii=False)
 
 
+# ── Cached inner helpers ────────────────────────────────────────────────────────
+# lru_cache on raw subprocess/HTTP calls — the @mcp.tool() wrappers call these.
+# Man pages and TLDR content are immutable between package updates, so session-
+# level caching is safe. cheat.sh is network-backed; cached per command+query key.
+
+
+@lru_cache(maxsize=256)
+def _man_page(command: str) -> str:
+    """Cached man page retrieval. Man pages don't change between package versions."""
+    return run_command(["man", "-P", "cat", command])
+
+
+@lru_cache(maxsize=256)
+def _tldr_page(command: str) -> str:
+    """Cached TLDR page retrieval. TLDR cache only updates via explicit 'tldr --update'."""
+    return run_command(["tldr", command])
+
+
+@lru_cache(maxsize=128)
+def _cheat_sh_fetch(path: str, style: str) -> str:
+    """Cached cheat.sh fetch. Content is community-maintained and rarely changes."""
+    url = f"{CHEAT_SH_BASE}/{path}"
+    req_params: dict = {}
+    if style == "plain":
+        req_params["T"] = ""
+    try:
+        resp = _session.get(url, params=req_params, timeout=15)
+        resp.raise_for_status()
+        return resp.text.strip()
+    except requests.exceptions.Timeout:
+        return "__TIMEOUT__"
+    except requests.exceptions.RequestException as e:
+        return f"__ERROR__:{e}"
+
+
 # ── Tools ──────────────────────────────────────────────────────────────────────
 
 @mcp.tool(
@@ -154,7 +190,7 @@ def command_docs_man_lookup(params: ManLookupInput) -> str:
     **OUTPUT EXPECTATION:** Returns the full man page content: SYNOPSIS,
     DESCRIPTION, OPTIONS, EXAMPLES, SEE ALSO.
     """
-    output = run_command(["man", "-P", "cat", params.command])
+    output = _man_page(params.command)
     if "No manual entry" in output or "can't open" in output.lower():
         return f"Error: No manual page found for '{params.command}'."
     return _format_response(output, f"Man Page: {params.command}", params.response_format)
@@ -185,7 +221,7 @@ def command_docs_tldr_lookup(params: TldrLookupInput) -> str:
     **OUTPUT EXPECTATION:** Returns simplified cheat sheet with concrete
     command invocations grouped by use case.
     """
-    output = run_command(["tldr", params.command])
+    output = _tldr_page(params.command)
     if "No documentation" in output or "not found" in output.lower():
         return f"No TLDR page found for '{params.command}'. Try command_docs_man_lookup instead."
     return _format_response(output, f"TLDR: {params.command}", params.response_format)
@@ -223,24 +259,16 @@ def command_docs_cheat_sh_lookup(params: CheatShLookupInput) -> str:
         if safe_query:
             path = f"{params.command}/{safe_query}"
 
-    url = f"{CHEAT_SH_BASE}/{path}"
-    req_params: dict = {}
-    if params.style == "plain":
-        req_params["T"] = ""
-
-    try:
-        resp = _session.get(url, params=req_params, timeout=15)
-        resp.raise_for_status()
-        text = resp.text.strip()
-        if not text or "Unknown topic" in text:
-            return f"No cheat.sh entry found for '{path}'."
-        if len(text) > 50000:
-            text = text[:50000] + "\n\n... [Response truncated at 50k chars]"
-        return _format_response(text, f"cheat.sh: {path}", params.response_format)
-    except requests.exceptions.Timeout:
+    text = _cheat_sh_fetch(path, params.style)
+    if text == "__TIMEOUT__":
         return "Error: cheat.sh request timed out after 15 seconds."
-    except requests.exceptions.RequestException as e:
-        return f"Error fetching from cheat.sh: {str(e)}"
+    if text.startswith("__ERROR__:"):
+        return f"Error fetching from cheat.sh: {text[9:]}"
+    if not text or "Unknown topic" in text:
+        return f"No cheat.sh entry found for '{path}'."
+    if len(text) > 50000:
+        text = text[:50000] + "\n\n... [Response truncated at 50k chars]"
+    return _format_response(text, f"cheat.sh: {path}", params.response_format)
 
 
 if __name__ == "__main__":

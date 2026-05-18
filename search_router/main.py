@@ -8,14 +8,17 @@ It returns a JSON routing config that specifies which engine to call,
 with exactly what parameters, and when to trigger fallback.
 
 Engine tool names this router references (implement as separate MCP servers):
-  brave_search_web(q, count, extra_snippets, freshness, country,
-                   search_lang, goggles_id) → /res/v1/web/search
-  brave_search_news(q, count, freshness)     → /res/v1/news/search
-  exa_search_query(query, type, numResults, includeDomains,
-                   contents_highlights, contents_text, highlightQuery,
-                   startPublishedDate)        → /search
-  exa_find_similar(url, numResults, contents_text) → /findSimilar
-  searxng_web_search(query, categories, num_results, time_range, language)
+  brave_search_web(query, count, extra_snippets, freshness, country,
+                   search_lang, goggles_id)
+  brave_search_news(query, count, freshness, country, search_lang, extra_snippets)
+  exa_search_query(query, search_type, num_results, include_domains,
+                   exclude_domains, start_published_date, end_published_date,
+                   include_text, include_highlights, highlight_query,
+                   num_sentences, highlights_per_result)
+  exa_find_similar(url, num_results, include_domains, exclude_domains,
+                   include_text, include_highlights, highlight_query,
+                   num_sentences, highlights_per_result)
+  searxng_web_search(query, num_results, categories, time_range, language)
   page_scrape_crawl4ai_fetch(url, use_cache)
   page_scrape_crawl4ai_fetch_many(urls, use_cache)
 """
@@ -27,6 +30,56 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("search_router")
 
+# ── Cache integration ────────────────────────────────────────────────────────
+
+def _cache_section(
+    query: str,
+    category: str,
+    document_kind: str,
+    intent: str,
+    extra_params: dict | None = None,
+) -> dict:
+    """
+    Return the standard cache block injected at the top of every routing config.
+    Agents must execute step_0 before calling any search engine.
+    """
+    params_dict = {"intent": intent, **(extra_params or {})}
+    params_json = json.dumps(params_dict, sort_keys=True)
+    return {
+        "STEP_0__CACHE_LOOKUP": {
+            "tool": "cache_lookup",
+            "mandatory": "Call this BEFORE any search engine. On hit: skip ALL steps below. On miss: proceed.",
+            "params": {
+                "query": query,
+                "category": category,
+                "parameters": params_json,
+            },
+            "on_hit": (
+                "Cache hit — use the returned `summary` and `full_content` directly. "
+                "Skip ALL search engine steps below. Do not call Brave, Exa, or SearXNG."
+            ),
+            "on_miss": "Cache miss — proceed with the search steps below.",
+        },
+        "STEP_LAST__CACHE_STORE": {
+            "tool": "cache_store",
+            "mandatory": "After search completes successfully: store the result in cache for future reuse.",
+            "params": {
+                "query": query,
+                "category": category,
+                "document_kind": document_kind,
+                "parameters": params_json,
+            },
+            "guidance": (
+                "Pass the full concatenated search result text as `full_content`. "
+                "Write a 2–3 sentence distillation as `summary`. "
+                "Pass the primary result URL as `source_url`. "
+                "Pass `api_cost_usd` and `latency_ms` if known — "
+                "they improve eviction scoring."
+            ),
+        },
+    }
+
+
 # ── Goggle URLs ─────────────────────────────────────────────────────────────
 # After hosting each .goggle file as a public GitHub Gist, replace the
 # PENDING strings with the raw file URL (e.g. https://gist.githubusercontent.com/...)
@@ -34,7 +87,12 @@ _GOGGLES: dict[str, str] = {
     "study": "",
     "verification": "",
     "price": "",
+    "concept": "",
     "tool_development": "",
+    "documentation": "",
+    "store_discovery": "",
+    "reputation": "",
+    "recommendation": "",
 }
 
 
@@ -75,22 +133,157 @@ _BR_GOV_DOC_DOMAINS = [
 
 # ── Routing builders ─────────────────────────────────────────────────────────
 
+def _route_store_discovery(query: str) -> dict:
+    """Brave-only store discovery for the Brazilian market. No Exa — domain
+    restrictions make it useless for store discovery. No SearXNG — too noisy
+    for commercial intent."""
+    return {
+        "intent": "store_discovery",
+        "cache": _cache_section(query, "web_search", "VERSIONED", "store_discovery"),
+        "strategy": "brave_only_no_exa_no_searxng",
+        "do_not_call_exa": True,
+        "do_not_call_searxng": True,
+        "step_1_brave_general": {
+            "engine": "brave",
+            "tool": "brave_search_web",
+            "call_in_parallel_with": "step_2_brave_buscape",
+            "params": {
+                "query": query,
+                "country": "BR",
+                "search_lang": "pt-br",
+                "count": 15,
+                "freshness": "pm",
+                "extra_snippets": True,
+                **_goggle("store_discovery"),
+            },
+        },
+        "step_2_brave_buscape": {
+            "engine": "brave",
+            "tool": "brave_search_web",
+            "call_in_parallel_with": "step_1_brave_general",
+            "params": {
+                "query": f"{query} site:buscape.com.br",
+                "count": 10,
+                "extra_snippets": True,
+            },
+        },
+        "url_extraction": {
+            "tool": "page_scrape_crawl4ai_fetch",
+            "note": "Use for any store URL you want to inspect in full.",
+        },
+        "cost_note": "Brave only — two parallel calls ($5/1k each). No Exa, no SearXNG.",
+    }
+
+
+def _route_reputation(query: str) -> dict:
+    """Brave-only reputation check for Brazilian stores/companies. Two parallel
+    calls: general web for forum discussions and Reclame Aqui for structured
+    complaint data. No Exa — domain restrictions block commerce/consumer sites.
+    No SearXNG — too noisy for trust signals."""
+    return {
+        "intent": "reputation",
+        "cache": _cache_section(query, "web_search", "VERSIONED", "reputation"),
+        "strategy": "brave_only_two_parallel_calls",
+        "do_not_call_exa": True,
+        "do_not_call_searxng": True,
+        "step_1_brave_general": {
+            "engine": "brave",
+            "tool": "brave_search_web",
+            "call_in_parallel_with": "step_2_brave_reclame_aqui",
+            "params": {
+                "query": query,
+                "country": "BR",
+                "search_lang": "pt-br",
+                "count": 10,
+                "freshness": "py",
+                "extra_snippets": True,
+                **_goggle("reputation"),
+            },
+        },
+        "step_2_brave_reclame_aqui": {
+            "engine": "brave",
+            "tool": "brave_search_web",
+            "call_in_parallel_with": "step_1_brave_general",
+            "params": {
+                "query": f"{query} site:reclameaqui.com.br",
+                "count": 10,
+                "extra_snippets": True,
+            },
+        },
+        "guidance": (
+            "The agent's query MUST include the company/website name plus "
+            "'reclame aqui confiável review' or similar reputation keywords. "
+            "Cross-reference Reclame Aqui score with forum complaints (Reddit, "
+            "Ludopedia) for a complete trust picture. For small companies not on "
+            "Reclame Aqui, the general search is the primary signal — an absent "
+            "Reclame Aqui page is a data point, not a verdict."
+        ),
+        "cost_note": "Brave only — two parallel calls for reputation coverage.",
+    }
+
+
+def _route_recommendation(query: str) -> dict:
+    """Brave-only product recommendation. Two parallel calls: general web for
+    reviews/comparisons, Reddit for real-user experiences. No Exa — domain
+    restrictions actively block review sites and forums. No SearXNG — too
+    noisy for curated recommendations."""
+    return {
+        "intent": "recommendation",
+        "cache": _cache_section(query, "web_search", "VERSIONED", "recommendation"),
+        "strategy": "brave_only_two_parallel_calls",
+        "do_not_call_exa": True,
+        "do_not_call_searxng": True,
+        "step_1_brave_general": {
+            "engine": "brave",
+            "tool": "brave_search_web",
+            "call_in_parallel_with": "step_2_brave_reddit",
+            "params": {
+                "query": query,
+                "count": 10,
+                "freshness": "py",
+                "extra_snippets": True,
+                **_goggle("recommendation"),
+            },
+        },
+        "step_2_brave_reddit": {
+            "engine": "brave",
+            "tool": "brave_search_web",
+            "call_in_parallel_with": "step_1_brave_general",
+            "params": {
+                "query": f"{query} site:reddit.com",
+                "count": 10,
+                "extra_snippets": True,
+            },
+        },
+        "guidance": (
+            "This intent is for product selection — 'what X should I buy for Y?' "
+            "NOT for 'what is X?' (use concept) or 'how much does X cost?' (use price). "
+            "Query examples: 'best AWG enameled copper wire for PCB repair', "
+            "'melhor filamento PLA para miniaturas impressão 3D'. "
+            "The Reddit parallel surfaces real-user comparisons and long-term "
+            "experiences that review sites miss."
+        ),
+        "cost_note": "Brave only — general + Reddit parallel ($5/1k each).",
+    }
+
+
 def _route_study(query: str, topic_age_months: Optional[int]) -> dict:
     recent = topic_age_months is not None and topic_age_months < 6
     config: dict = {
         "intent": "study",
+        "cache": _cache_section(query, "research", "VERSIONED", "study"),
         "strategy": "exa_primary_brave_fallback",
         "step_1_primary": {
             "engine": "exa",
             "tool": "exa_search_query",
             "params": {
                 "query": query,
-                "type": "neural",
-                "numResults": 7,
-                "includeDomains": _STUDY_DOMAINS,
-                "contents_highlights": True,
-                "contents_text": False,
-                "highlightQuery": query,
+                "search_type": "neural",
+                "num_results": 7,
+                "include_domains": _STUDY_DOMAINS,
+                "include_highlights": True,
+                "include_text": False,
+                "highlight_query": query,
             },
         },
         "fallback_trigger": (
@@ -103,7 +296,7 @@ def _route_study(query: str, topic_age_months: Optional[int]) -> dict:
             "engine": "brave",
             "tool": "brave_search_web",
             "params": {
-                "q": query,
+                "query": query,
                 "count": 10,
                 "extra_snippets": True,
                 **_goggle("study"),
@@ -124,13 +317,17 @@ def _route_verification(
     freshness = "pw" if (topic_age_months is not None and topic_age_months < 1) else None
     config: dict = {
         "intent": "verification",
+        "cache": _cache_section(
+            query, "news", "EVENT", "verification",
+            {"freshness": freshness} if freshness else None,
+        ),
         "strategy": "brave_web_plus_news_parallel_exa_supplement_if_academic",
         "step_1a_brave_web": {
             "engine": "brave",
             "tool": "brave_search_web",
             "call_in_parallel_with": "step_1b_brave_news",
             "params": {
-                "q": f"{query} source",
+                "query": f"{query} source",
                 "count": 10,
                 "extra_snippets": True,
                 **_goggle("verification"),
@@ -142,7 +339,7 @@ def _route_verification(
             "tool": "brave_search_news",
             "call_in_parallel_with": "step_1a_brave_web",
             "params": {
-                "q": query,
+                "query": query,
                 "count": 10,
                 "freshness": "pm",
             },
@@ -155,12 +352,12 @@ def _route_verification(
             "tool": "exa_search_query",
             "params": {
                 "query": query,
-                "type": "neural",
-                "numResults": 5,
-                "includeDomains": _EXA_ACADEMIC_DOMAINS,
-                "contents_highlights": True,
-                "contents_text": False,
-                "highlightQuery": query,
+                "search_type": "neural",
+                "num_results": 5,
+                "include_domains": _EXA_ACADEMIC_DOMAINS,
+                "include_highlights": True,
+                "include_text": False,
+                "highlight_query": query,
             },
         } if is_scientific else None,
         "synthesis_note": (
@@ -176,33 +373,54 @@ def _route_price(query: str) -> dict:
     year = "2026"
     return {
         "intent": "price",
-        "strategy": "brave_only_two_parallel_calls",
+        "cache": _cache_section(query, "live", "EVENT", "price"),
+        "strategy": "brave_only_three_parallel_calls",
         "do_not_call_exa": True,
         "step_1a_brave_general": {
             "engine": "brave",
             "tool": "brave_search_web",
-            "call_in_parallel_with": "step_1b_brave_buscape",
+            "call_in_parallel_with": ["step_1b_brave_mercadolivre", "step_1c_brave_buscape"],
             "params": {
-                "q": f"{query} preço {year}",
+                "query": f"{query} preço {year}",
                 "country": "BR",
-                "search_lang": "pt",
+                "search_lang": "pt-br",
                 "freshness": "pd",
                 "count": 20,
                 "extra_snippets": True,
                 **_goggle("price"),
             },
         },
-        "step_1b_brave_buscape": {
+        "step_1b_brave_mercadolivre": {
             "engine": "brave",
             "tool": "brave_search_web",
-            "call_in_parallel_with": "step_1a_brave_general",
+            "call_in_parallel_with": ["step_1a_brave_general", "step_1c_brave_buscape"],
             "params": {
-                "q": f"{query} site:buscape.com.br",
+                "query": f"{query} site:mercadolivre.com.br",
+                "country": "BR",
+                "search_lang": "pt-br",
+                "count": 15,
+                "extra_snippets": True,
+            },
+            "note": (
+                "Mercado Livre is the dominant BR marketplace. Their pages block crawlers, "
+                "but Brave's index surfaces listings via search snippets. Parse "
+                "extra_snippets aggressively — they often carry price + seller metadata."
+            ),
+        },
+        "step_1c_brave_buscape": {
+            "engine": "brave",
+            "tool": "brave_search_web",
+            "call_in_parallel_with": ["step_1a_brave_general", "step_1b_brave_mercadolivre"],
+            "params": {
+                "query": f"{query} site:buscape.com.br",
                 "count": 10,
                 "extra_snippets": True,
             },
         },
         "parsing_note": (
+            "Three parallel calls — execute all simultaneously. "
+            "Mercado Livre is the primary BR price signal (dominant marketplace). "
+            "Buscapé adds retail price comparison. "
             "Parse extra_snippets fields aggressively — they often contain "
             "price metadata pulled from structured page markup. "
             "Do not call Exa; its index does not cover e-commerce product pages."
@@ -217,20 +435,26 @@ def _route_concept(
 ) -> dict:
     domains = _CONCEPT_DOMAINS.get(domain_category, _CONCEPT_DOMAINS["general"])
     recent = topic_age_months is not None and topic_age_months < 3
+    # Computing concepts are technical docs; scientific/general are reference-grade
+    cache_category = "docs_technical" if domain_category == "computing" else "reference"
     return {
         "intent": "concept",
+        "cache": _cache_section(
+            query, cache_category, "VERSIONED", "concept",
+            {"domain_category": domain_category},
+        ),
         "strategy": "exa_primary_brave_fallback",
         "step_1_primary": {
             "engine": "exa",
             "tool": "exa_search_query",
             "params": {
                 "query": query,
-                "type": "neural",
-                "numResults": 5,
-                "includeDomains": domains,
-                "contents_highlights": True,
-                "contents_text": False,
-                "highlightQuery": query,
+                "search_type": "neural",
+                "num_results": 5,
+                "include_domains": domains,
+                "include_highlights": True,
+                "include_text": False,
+                "highlight_query": query,
             },
         },
         "domain_category_selected": domain_category,
@@ -245,7 +469,7 @@ def _route_concept(
             "engine": "brave",
             "tool": "brave_search_web",
             "params": {
-                "q": query,
+                "query": query,
                 "count": 5,
                 "extra_snippets": True,
             },
@@ -261,6 +485,7 @@ def _route_concept(
 def _route_tool_development(query: str, need_full_text: bool) -> dict:
     return {
         "intent": "tool_development",
+        "cache": _cache_section(query, "docs_technical", "VERSIONED", "tool_development"),
         "strategy": "searxng_primary_brave_fallback_exa_tertiary",
         "step_1_primary": {
             "engine": "searxng",
@@ -281,7 +506,7 @@ def _route_tool_development(query: str, need_full_text: bool) -> dict:
             "engine": "brave",
             "tool": "brave_search_web",
             "params": {
-                "q": query,
+                "query": query,
                 "count": 10,
                 "extra_snippets": True,
                 **_goggle("tool_development"),
@@ -297,19 +522,19 @@ def _route_tool_development(query: str, need_full_text: bool) -> dict:
             "tool": "exa_search_query",
             "params": {
                 "query": query,
-                "type": "keyword",
-                "numResults": 3,
-                "includeDomains": [
+                "search_type": "keyword",
+                "num_results": 3,
+                "include_domains": [
                     "INSTRUCTION: restrict to the single official docs domain "
                     "(e.g. docs.python.org, docs.rs, axum.rs). "
                     "Discover it via Brave if unknown."
                 ],
-                "contents_highlights": False,
-                "contents_text": True,
+                "include_highlights": False,
+                "include_text": True,
             },
         } if need_full_text else None,
         "type_note": (
-            "Use type=keyword (not neural) for Exa on this intent — library and API "
+            "Use search_type=keyword (not neural) for Exa on this intent — library and API "
             "names are precise identifiers that benefit from exact matching."
         ),
     }
@@ -322,9 +547,19 @@ def _route_documentation(
     extra_domains: Optional[list[str]],
     is_br_regulatory: bool,
 ) -> dict:
+    _STATIC_DOC_DOMAINS = {"ietf.org", "w3.org", "rfc-editor.org"}
+
     if known_url:
+        # Can't inspect domains when URL is known; treat conservatively
+        extra_set = set(extra_domains or [])
+        doc_kind = "STATIC" if (extra_set & _STATIC_DOC_DOMAINS) else "VERSIONED"
+        cache_cat = "static" if doc_kind == "STATIC" else "docs_technical"
         return {
             "intent": "documentation",
+            "cache": _cache_section(
+                query, cache_cat, doc_kind, "documentation",
+                {"known_url": known_url},
+            ),
             "strategy": "url_known_skip_search",
             "step_1_crawl4ai": {
                 "tool": "page_scrape_crawl4ai_fetch",
@@ -339,20 +574,28 @@ def _route_documentation(
     if extra_domains:
         base_domains.extend(extra_domains)
 
+    # Only treat as STATIC when the caller *explicitly* targets a standards body
+    # via extra_domains. base_domains includes ietf.org/w3.org as general discovery
+    # domains, not as a signal that the query is about a specific standard.
+    explicit_set = set(extra_domains or [])
+    doc_kind = "STATIC" if (explicit_set & _STATIC_DOC_DOMAINS) else "VERSIONED"
+    cache_cat = "static" if doc_kind == "STATIC" else "docs_technical"
+
     return {
         "intent": "documentation",
+        "cache": _cache_section(query, cache_cat, doc_kind, "documentation"),
         "strategy": "exa_neural_plus_findSimilar_brave_discovery_crawl4ai_extraction",
         "step_1_exa_search": {
             "engine": "exa",
             "tool": "exa_search_query",
             "params": {
                 "query": query,
-                "type": "neural",
-                "numResults": 7,
-                "includeDomains": base_domains,
-                "contents_highlights": True,
-                "contents_text": need_full_text,
-                "highlightQuery": query,
+                "search_type": "neural",
+                "num_results": 7,
+                "include_domains": base_domains,
+                "include_highlights": True,
+                "include_text": need_full_text,
+                "highlight_query": query,
             },
         },
         "step_2_findSimilar": {
@@ -361,8 +604,8 @@ def _route_documentation(
             "trigger": "After step 1: if any result is highly relevant, call findSimilar on its URL",
             "params": {
                 "url": "INSTRUCTION: use the URL of the most relevant result from step 1",
-                "numResults": 5,
-                "contents_text": True,
+                "num_results": 5,
+                "include_text": True,
             },
         },
         "step_3_multi_page_option": {
@@ -374,7 +617,7 @@ def _route_documentation(
             "brave_discovery": {
                 "tool": "brave_search_web",
                 "params": {
-                    "q": (
+                    "query": (
                         "INSTRUCTION: format as '<topic> site:<docs_domain>' — "
                         "e.g., 'middleware site:docs.axum.rs'"
                     ),
@@ -411,7 +654,8 @@ def _route_documentation(
 def search_router_get_routing(
     intent: Literal[
         "study", "verification", "price", "concept",
-        "tool_development", "documentation"
+        "tool_development", "documentation", "store_discovery",
+        "reputation", "recommendation",
     ],
     query: str,
     topic_age_months: Optional[int] = None,
@@ -429,6 +673,16 @@ def search_router_get_routing(
     tells you which engine to call (Brave / Exa / SearXNG), with exactly what parameters,
     in what order, and when to trigger fallback or supplemental calls.
     Never call search tools without consulting this router first.
+
+    **CACHE INTEGRATION:** Every routing config now includes a `cache` block with
+    two mandatory steps:
+    - `step_0_cache_lookup` — call `cache_lookup` BEFORE any search engine call.
+      On hit: use cached content, skip all search steps.
+      On miss: proceed with the search steps.
+    - `step_last_cache_store` — after a successful search, call `cache_store`
+      with the result to populate the cache for future queries.
+    The `cache` block pre-fills the correct `category` and `document_kind` for
+    each intent (e.g., `price` → `live`, documentation on IETF/W3C → `static`).
 
     **ENGINE OVERVIEW:**
 
@@ -490,6 +744,20 @@ def search_router_get_routing(
                     Set is_br_regulatory=True for gov.br / planalto.gov.br content.
                     Set extra_domains to append product-specific docs domains.
 
+    store_discovery → Brave only (country=BR, search_lang=pt-br, freshness=pm,
+                       Buscapé parallel). No Exa — domain restrictions block commerce.
+                       No SearXNG — too noisy for store discovery.
+                       Use when finding Brazilian stores in a specific niche.
+
+    reputation     → Brave only (country=BR, search_lang=pt-br, freshness=py,
+                       Reclame Aqui parallel). No Exa, no SearXNG.
+                       Use when checking if a store/company is trustworthy.
+                       Query must include company name + 'reclame aqui confiável'.
+
+    recommendation → Brave only (freshness=py, Reddit parallel). No Exa, no SearXNG.
+                       Use for product selection — 'what X should I buy for Y?'
+                       NOT for 'what is X?' (concept) or 'how much?' (price).
+
     **CONSTRAINT WARNING:**
     Goggles are optional. By default all goggle slots are empty and goggles_id is
     omitted from Brave params. To activate a goggle, host the .goggle file at a
@@ -529,6 +797,9 @@ def search_router_get_routing(
         "documentation": lambda: _route_documentation(
             query, known_url, need_full_text, extra_domains, is_br_regulatory
         ),
+        "store_discovery": lambda: _route_store_discovery(query),
+        "reputation": lambda: _route_reputation(query),
+        "recommendation": lambda: _route_recommendation(query),
     }
 
     config = dispatch[intent]()

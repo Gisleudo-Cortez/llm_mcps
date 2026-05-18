@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ascii-art-mcp"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.27.0",
+    "ascii-art-tool",
+]
+
+[tool.uv.sources]
+ascii-art-tool = { path = "../../../04-projects-by-language/python/ascii-art-tool", editable = true }

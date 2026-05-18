@@ -15,7 +15,7 @@ import pandas as pd
 import pypdf
 from chromadb import PersistentClient
 from markitdown import MarkItDown
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.fastmcp import FastMCP
 from PIL import Image as PILImage
 
 # Initialize the MCP server
@@ -63,9 +63,15 @@ def _get_ollama_http():
     return _ollama_http
 
 
-def _embed(texts: list[str]) -> list:
-    """Embed a list of texts. Dispatches to Ollama or SentenceTransformers."""
-    if RAG_EMBED_PROVIDER == "ollama":
+def _embed(texts: list[str], provider: str = "") -> list:
+    """Embed a list of texts. Dispatches to Ollama or SentenceTransformers.
+
+    If 'provider' is given (\"local\" or \"ollama\"), it overrides the
+    RAG_EMBED_PROVIDER env var for this call only. Otherwise falls back
+    to the env var.
+    """
+    use_ollama = (provider or RAG_EMBED_PROVIDER) == "ollama"
+    if use_ollama:
         resp = _get_ollama_http().post(
             "/api/embed",
             json={"model": RAG_OLLAMA_EMBED, "input": texts},
@@ -482,7 +488,11 @@ def extract_image_for_vision(file_path: str, image_id: int) -> str:
         "openWorldHint": False
 }
 )
-def index_document_for_search(file_path: str, collection_name: str = "default") -> str:
+def index_document_for_search(
+    file_path: str,
+    collection_name: str = "default",
+    embed_provider: str = "",
+) -> str:
     """
     Prepare a document for semantic retrieval by chunking and storing in the Vector DB.
 
@@ -528,7 +538,7 @@ def index_document_for_search(file_path: str, collection_name: str = "default") 
 
     ids = [f"{file_basename}_{i}" for i in range(len(chunks))]
     metadatas = [{"source": file_path, "chunk_index": i} for i in range(len(chunks))]
-    embeddings = _embed(chunks)
+    embeddings = _embed(chunks, provider=embed_provider)
 
     collection.add(
         ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas
@@ -559,8 +569,9 @@ def semantic_search(
     collection_name: str = "default",
     n_results: int = 3,
     source_filter: str = "",
-    max_distance: float = 1.2,
+    max_distance: float = 0.75,
     search_mode: Literal["hybrid", "vector", "keyword"] = "hybrid",
+    embed_provider: str = "",
 ) -> str:
     """
     Search indexed documents using hybrid BM25 + vector search (default) or either alone.
@@ -613,7 +624,7 @@ def semantic_search(
     vector_results = []
     try:
         collection = chroma_client.get_collection(name=collection_name)
-        query_embedding = _embed([query])
+        query_embedding = _embed([query], provider=embed_provider)
         where_clause = {"source": source_filter} if source_filter else None
         fetch_n = n_results if search_mode == "vector" else n_results * 2
         raw = collection.query(
@@ -949,14 +960,13 @@ def compare_documents(
     if text_b.startswith("Error"):
         return f"Error reading file B: {text_b}"
 
-    model = get_embed_model()
     name_a = os.path.basename(file_path_a)
     name_b = os.path.basename(file_path_b)
 
     if not query:
-        # Overall document-level similarity
-        emb_a = model.encode([text_a[:3000]])[0]
-        emb_b = model.encode([text_b[:3000]])[0]
+        # Overall document-level similarity — use unified embedder (respects RAG_EMBED_PROVIDER)
+        emb_a = _embed([text_a[:3000]])[0]
+        emb_b = _embed([text_b[:3000]])[0]
         sim = cosine_similarity(emb_a, emb_b)
 
         interpretation = (
@@ -991,12 +1001,12 @@ def compare_documents(
         if not chunks:
             return text[:chunk_size]
 
-        embs = model.encode(chunks)
+        embs = _embed(chunks)
         sims = [cosine_similarity(q_emb, e) for e in embs]
         best_idx = max(range(len(sims)), key=lambda i: sims[i])
         return chunks[best_idx], sims[best_idx]
 
-    q_emb = model.encode([query])[0]
+    q_emb = _embed([query])[0]
     passage_a, score_a = top_passage(text_a, q_emb)
     passage_b, score_b = top_passage(text_b, q_emb)
 
@@ -1034,8 +1044,7 @@ def load_local_image(file_path: str):
     are automatically downsampled to 1024x1024 for context window protection (this is intentional and cannot be disabled).
     RGBA/transparency issues are handled automatically by converting to RGB with white background.
 
-    **OUTPUT EXPECTATION:** Returns FastMCP Image object optimized for vision model consumption. Ideal for
-    analysis tasks requiring visual input, such as chart interpretation, diagram understanding, or screenshot review.
+    **OUTPUT EXPECTATION:** Returns Base64-encoded PNG data URI string, identical format to\nextract_image_for_vision — pipe directly into vision-capable models.
 
     *Note:* The tool handles color normalization and resizing internally—no manual preprocessing required.
     """
@@ -1069,14 +1078,12 @@ def load_local_image(file_path: str):
                 (max_dimension, max_dimension), PILImage.Resampling.LANCZOS
             )
 
-        # 4. Export to standardized PNG bytes
+        # 4. Export to standardized PNG bytes and encode as base64 data URI
         output_buffer = io.BytesIO()
         pil_img.save(output_buffer, format="PNG", optimize=True)
-        standardized_bytes = output_buffer.getvalue()
+        base64_str = base64.b64encode(output_buffer.getvalue()).decode("utf-8")
 
-        # 5. Return native FastMCP Image object
-        # Note: No return type hint is used in the function signature to avoid Pydantic serialization errors.
-        return Image(data=standardized_bytes, format="png")
+        return f"data:image/png;base64,{base64_str}"
 
     except Exception as e:
         return f"Error loading and processing local image: {str(e)}"
