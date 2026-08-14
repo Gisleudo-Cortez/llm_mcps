@@ -35,10 +35,7 @@ mcp = FastMCP("llm_mcp")
 # Configuration
 # ---------------------------------------------------------------------------
 
-OLLAMA_URL = os.getenv(
-    "OLLAMA_URL",
-    os.getenv("LM_STUDIO_URL", "http://localhost:11434"),
-)
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 OLLAMA_FAST_MODEL = os.getenv("OLLAMA_FAST_MODEL", "qwen3:4b")
 OLLAMA_STANDARD_MODEL = os.getenv("OLLAMA_STANDARD_MODEL", "granite4.1:8b")

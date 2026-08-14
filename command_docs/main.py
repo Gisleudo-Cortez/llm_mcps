@@ -59,6 +59,13 @@ class ManLookupInput(BaseModel):
     @field_validator("command")
     @classmethod
     def _validate_command(cls, v: str) -> str:
+        v = v.strip()
+        if " " in v or "/" in v:
+            suggested = v.replace(" ", "-")
+            raise ValueError(
+                f"Multi-word command '{v}' is not a valid single command name. "
+                f"Did you mean '{suggested}'? Try using the hyphenated form instead."
+            )
         if not re.match(r"^[a-zA-Z0-9_.@-]+$", v):
             raise ValueError("Command name must be alphanumeric with hyphens, underscores, dots, or @.")
         return v
@@ -82,6 +89,13 @@ class TldrLookupInput(BaseModel):
     @field_validator("command")
     @classmethod
     def _validate_command(cls, v: str) -> str:
+        v = v.strip()
+        if " " in v or "/" in v:
+            suggested = v.replace(" ", "-")
+            raise ValueError(
+                f"Multi-word command '{v}' is not a valid single command name. "
+                f"Did you mean '{suggested}'? Try using the hyphenated form instead."
+            )
         if not re.match(r"^[a-zA-Z0-9_.@-]+$", v):
             raise ValueError("Command name must be alphanumeric with hyphens, underscores, dots, or @.")
         return v
@@ -114,6 +128,13 @@ class CheatShLookupInput(BaseModel):
     @field_validator("command")
     @classmethod
     def _validate_command(cls, v: str) -> str:
+        v = v.strip()
+        if " " in v or "/" in v:
+            suggested = v.replace(" ", "-")
+            raise ValueError(
+                f"Multi-word command '{v}' is not a valid single command name. "
+                f"Did you mean '{suggested}'? Try using the hyphenated form instead."
+            )
         if not re.match(r"^[a-zA-Z0-9_.@-]+$", v):
             raise ValueError("Command name must be alphanumeric with hyphens, underscores, dots, or @.")
         return v
