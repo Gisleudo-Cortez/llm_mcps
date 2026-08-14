@@ -1,17 +1,56 @@
-.ruff_cache/
+# Bytecode
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Test / lint / type check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+*.cover
+
+# Python packaging
 *.egg-info/
-chroma_db/
-garmin_mcp/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Third-party sub-projects (managed independently, no own .git)
 crawl4ai/
 
-# Secrets — never commit
-.env
-.env.local
-*.env
+# Vector DB / embedded database artifacts
+chroma_db/
+*.lance/
+search_cache/cache_db/
 
 # Logs
 *.log
+
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*
+!env.example
+!env.sh
+*.key
+*.pem
+
+# System files
+Thumbs.db
