@@ -103,18 +103,25 @@ def _goggle(key: str) -> dict:
 
 # ── Static domain lists ──────────────────────────────────────────────────────
 _STUDY_DOMAINS = [
-    "wikipedia.org", "pt.wikipedia.org", "britannica.com",
-    "khanacademy.org", "arxiv.org", "scielo.br",
-    "capes.gov.br", "plato.stanford.edu", "ncbi.nlm.nih.gov", "jstor.org",
+    "arxiv.org",
+    "paperswithcode.com",
+    "aclanthology.org",
+    "openreview.net",
+    "huggingface.co",
 ]
 
 _CONCEPT_DOMAINS: dict[str, list[str]] = {
     "computing": [
-        "developer.mozilla.org", "docs.python.org",
-        "en.cppreference.com", "wikipedia.org",
+        "arxiv.org",
+        "developer.mozilla.org",
+        "docs.python.org",
+        "docs.rs",
+        "huggingface.co",
+        "github.com",
+        "wikipedia.org",
     ],
-    "scientific": ["wikipedia.org", "britannica.com", "ncbi.nlm.nih.gov"],
-    "general": ["wikipedia.org", "britannica.com", "plato.stanford.edu"],
+    "scientific": ["arxiv.org", "wikipedia.org", "britannica.com", "ncbi.nlm.nih.gov", "nature.com"],
+    "general": ["wikipedia.org", "britannica.com", "arxiv.org"],
 }
 
 _EXA_ACADEMIC_DOMAINS = [
