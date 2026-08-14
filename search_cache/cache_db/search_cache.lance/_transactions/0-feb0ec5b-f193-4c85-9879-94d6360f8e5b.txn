@@ -1,10 +1,0 @@
-$feb0ec5b-f193-4c85-9879-94d6360f8e5b²Šid ÿÿÿÿÿÿÿÿÿ*string08%
-query_hash ÿÿÿÿÿÿÿÿÿ*string08%
-query_text ÿÿÿÿÿÿÿÿÿ*string08'filtered_terms ÿÿÿÿÿÿÿÿÿ*list08item *string08%
-parameters ÿÿÿÿÿÿÿÿÿ*string08=query_embedding ÿÿÿÿÿÿÿÿÿ*fixed_size_list:float:38408"summary ÿÿÿÿÿÿÿÿÿ*string08-full_content ÿÿÿÿÿÿÿÿÿ*large_string08%
-source_url	 ÿÿÿÿÿÿÿÿÿ*string08.source_version_hash
- ÿÿÿÿÿÿÿÿÿ*string08#category ÿÿÿÿÿÿÿÿÿ*string08(document_kind ÿÿÿÿÿÿÿÿÿ*string08)validity_state ÿÿÿÿÿÿÿÿÿ*string08/
-created_at ÿÿÿÿÿÿÿÿÿ*timestamp:us:UTC082last_accessed ÿÿÿÿÿÿÿÿÿ*timestamp:us:UTC083ttl_expires_at ÿÿÿÿÿÿÿÿÿ*timestamp:us:UTC08&access_count ÿÿÿÿÿÿÿÿÿ*int3208)cache_hit_score ÿÿÿÿÿÿÿÿÿ*float08&api_cost_usd ÿÿÿÿÿÿÿÿÿ*float08$
-latency_ms ÿÿÿÿÿÿÿÿÿ*float08(content_tokens ÿÿÿÿÿÿÿÿÿ*int3208!feedback ÿÿÿÿÿÿÿÿÿ*int808"!
-lance.auto_cleanup.interval20"'
-lance.auto_cleanup.older_than14days

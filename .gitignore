@@ -40,6 +40,9 @@ chroma_db/
 *.lance/
 search_cache/cache_db/
 
+# Search cache LanceDB (runtime artifacts, not source)
+search_cache/cache_db/
+
 # Logs
 *.log
 
