@@ -5,14 +5,40 @@ Provides tools for classifying emails, routing attachments, and
 processing inboxes — all using local himalaya + ollama, zero cloud
 by default.
 
-Cloud fallback (google/gemma-4-31b-it:free, deepseek-v4-flash) is enabled.
+Cloud fallback (google/gemma-4-31b-it:free, deepseek-v4-flash) is opt-in.
 """
 
+import hashlib
+import json
+import logging
+import os
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# ── Structured logging ──────────────────────────────────────────────────
+# Logs to ~/.config/email-mcp/email-mcp.log (JSON lines, append-only)
+# Levels: DEBUG (per-email), INFO (batch summary), WARNING (cloud fallback),
+#          ERROR (failures)
+_LOG_DIR = Path.home() / ".config" / "email-mcp"
+_LOG_FILE = _LOG_DIR / "email-mcp.log"
+
+logger = logging.getLogger("email_mcp")
+logger.setLevel(logging.DEBUG)
+
+# File handler — JSON lines, append-only, survives restarts
+_log_fh = logging.FileHandler(_LOG_FILE)
+_log_fh.setLevel(logging.DEBUG)
+_log_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+logger.addHandler(_log_fh)
+
+# Console handler for stderr (visible during MCP dev, swallowed in production)
+_log_sh = logging.StreamHandler(sys.stderr)
+_log_sh.setLevel(logging.WARNING)
+_log_sh.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+logger.addHandler(_log_sh)
 
 from mcp.server.fastmcp import FastMCP
 
@@ -61,16 +87,61 @@ def _get_account(name: str) -> AccountConfig:
 
 
 def _move_attachment(src: str, dest_dir: str, skip_existing: bool = True) -> Optional[str]:
-    """Move a file to destination, handling duplicates. Returns final path or None."""
+    """Move a file to destination with content-hash dedup. Returns final path or None.
+
+    If a file with the same name exists at the destination:
+    - Same content (SHA-256 match) → skip (true duplicate), return None
+    - Different content → append _1, _2, etc. before extension (collision)
+    - skip_existing=False → always overwrite
+    """
     src_path = Path(src)
     dest_path = Path(dest_dir).expanduser().resolve() / src_path.name
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     if dest_path.exists() and skip_existing:
-        return None
+        # Content-hash comparison — only skip if truly identical
+        src_hash = _sha256_file(src_path)
+        dest_hash = _sha256_file(dest_path)
+        if src_hash == dest_hash:
+            logger.debug("dedup skip: %s (hash match)", dest_path.name)
+            return None
+        # Name collision, different content — rename with suffix
+        stem = dest_path.stem
+        suffix = dest_path.suffix
+        counter = 1
+        while dest_path.exists():
+            dest_path = dest_path.parent / f"{stem}_{counter}{suffix}"
+            counter += 1
+        logger.debug("name collision: renamed to %s", dest_path.name)
 
     shutil.move(str(src_path), str(dest_path))
     return str(dest_path)
+
+
+def _sha256_file(path: Path, chunk_size: int = 65536) -> str:
+    """Compute SHA-256 hash of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _audit_log(action: str, details: dict) -> None:
+    """Append an audit entry to the log file (JSONL format, append-only).
+
+    Records every file operation: routed, skipped, errored.
+    Survives restarts — the log is the durable record of what happened.
+    """
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "action": action,
+        **details,
+    }
+    logger.info("audit: %s %s", action, json.dumps(details, default=str))
 
 
 async def _classify_and_route(acct: AccountConfig, msg_id: int, sender: str, recipient: str, subject: str, body: str) -> dict:
@@ -256,6 +327,9 @@ async def route_attachments(
     # Batch classify
     results = await _batch_classify_and_route(acct, messages)
 
+    logger.info("batch_start account=%s folder=%s scanned=%d with_attachments=%d",
+                account_name, folder, len(envelopes), len(messages))
+
     routed = []
     skipped = []
     errored = []
@@ -316,19 +390,24 @@ async def route_attachments(
                         "saved_to": final_path,
                         "label": result["label"],
                     })
+                    _audit_log("routed", {"email_id": result["id"], "file": Path(final_path).name,
+                                          "dest": final_path, "label": result["label"]})
                 else:
                     skipped.append({
                         "id": result["id"],
                         "subject": result["subject"],
                         "file": Path(filepath).name,
-                        "reason": "already exists at destination",
+                        "reason": "already exists at destination (hash match)",
                     })
+                    _audit_log("skipped_dedup", {"email_id": result["id"], "file": Path(filepath).name})
         except RuntimeError as e:
             errored.append({
                 "id": result["id"],
                 "subject": result["subject"],
                 "error": str(e),
             })
+            logger.error("route error email_id=%d: %s", result["id"], str(e)[:200])
+            _audit_log("error", {"email_id": result["id"], "error": str(e)[:500]})
 
     # Clean up temp dir
     for f in dl_dir.iterdir():
@@ -340,6 +419,14 @@ async def route_attachments(
         dl_dir.rmdir()
     except OSError:
         pass
+
+    # Batch summary log
+    logger.info("batch_done account=%s folder=%s routed=%d skipped=%d errors=%d cloud=%d keyword=%d",
+                account_name, folder, len(routed), len(skipped), len(errored),
+                cloud_fallback_count, keyword_fallback_count)
+    if cloud_fallback_count > 0:
+        logger.warning("cloud_fallback_used count=%d — email content was sent to cloud for %d emails",
+                       cloud_fallback_count, cloud_fallback_count)
 
     return {
         "account": account_name,

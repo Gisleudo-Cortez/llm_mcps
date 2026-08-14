@@ -1,5 +1,6 @@
 """Load and validate email-mcp server configuration."""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -91,14 +92,23 @@ def load_config(path: Optional[str] = None) -> ServerConfig:
     if not tiers:
         tiers = _default_tiers()
 
+    # API key: prefer environment variable, fall back to YAML
+    api_key = os.environ.get("OPENROUTER_API_KEY", "") or cls_raw.get("api_key", "")
+
     classification = ClassificationConfig(
         tiers=tiers,
         allow_cloud_fallback=cls_raw.get("allow_cloud_fallback", False),
         confidence_threshold=cls_raw.get("confidence_threshold", 0.7),
         max_preview_chars=cls_raw.get("max_preview_chars", 500),
-        api_key=cls_raw.get("api_key", ""),
+        api_key=api_key,
         max_concurrent=cls_raw.get("max_concurrent", 4),
     )
+
+    # Validate: cloud tiers require an API key
+    has_cloud = any(t.provider == "cloud" for t in tiers)
+    if has_cloud and classification.allow_cloud_fallback and not api_key:
+        import warnings
+        warnings.warn("Cloud fallback enabled but no API key found (set OPENROUTER_API_KEY env var)")
 
     # Attachments
     att_raw = raw.get("attachments", {})
