@@ -22,7 +22,7 @@ A collection of independent MCP (Model Context Protocol) servers built with [Fas
 | `memory_notes/` | Memory & Notes | Persistent key-value memory across sessions (JSON file backend) |
 | `command_docs/` | Command Docs | man pages, tldr cheat sheets, and cheat.sh community recipes |
 | `awesome_lists/` | Awesome Lists | Browse/search the sindresorhus/awesome meta-list (local repo) |
-| `llm_tools/` | LLM Tools | Delegate tasks (summarize, ask, code review, data interpretation) to local models via LM Studio API |
+| `llm_tools/` | LLM Tools | Delegate tasks (summarize, ask, code review, data interpretation) to local models via Ollama API |
 | `code_check/` | Code Check Server | Format and lint generated code using the same tool chain as Neovim (ruff, prettier, stylua, shfmt, shellcheck, sqlfluff, …) |
 
 ## Commands
@@ -120,8 +120,8 @@ Formats and lints code snippets using the exact same binaries configured in the 
 
 ### LLM Tools (`llm_tools/`)
 
-Calls LM Studio's OpenAI-compatible API at `http://localhost:1234/v1` (default).
-Override via `LM_STUDIO_URL` env var — set to `http://localhost:11434/v1` for Ollama.
+Calls Ollama's API at `http://localhost:11434/v1` (default).
+Override via `OLLAMA_URL` env var.
 Override the auto-selected model via `LLM_TOOLS_DEFAULT_MODEL` env var.
 
 - `list_available_models()` → call first in any session to see loaded model IDs and context sizes.
@@ -169,7 +169,7 @@ Classifies emails and routes attachments using a tiered async LLM pipeline. Zero
 
 ## MCP Config
 
-Servers are registered in `~/.lmstudio/mcp.json`. Each entry points to the venv Python binary and the server's `main.py`. After adding a new server, add an entry there and restart LM Studio.
+Servers are registered via the MCP client configuration. Each entry points to the venv Python binary and the server's `main.py`.
 
 ## Dependencies
 
