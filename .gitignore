@@ -51,7 +51,7 @@ search_cache/cache_db/
 .env.local
 .env.*
 !env.example
-!env.sh
+env.sh
 *.key
 *.pem
 
