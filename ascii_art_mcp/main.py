@@ -17,11 +17,11 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-# Load OPENROUTER_API_KEY from ascii-art-tool's .env if not already in env
-_env_file = (
-    Path(__file__).parent.parent.parent.parent
-    / "04-projects-by-language/python/ascii-art-tool/.env"
-)
+# Load OPENROUTER_API_KEY from a local .env if present (path-agnostic:
+# checks the server dir, then the vendored package dir)
+_env_file = Path(__file__).parent / ".env"
+if not _env_file.exists():
+    _env_file = Path(__file__).parent / "ascii_art" / ".env"
 if _env_file.exists():
     for _line in _env_file.read_text().splitlines():
         _line = _line.strip()
