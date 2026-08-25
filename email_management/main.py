@@ -95,7 +95,11 @@ def _move_attachment(src: str, dest_dir: str, skip_existing: bool = True) -> Opt
     - skip_existing=False → always overwrite
     """
     src_path = Path(src)
-    dest_path = Path(dest_dir).expanduser().resolve() / src_path.name
+    # Sanitize filename — strip path separators, reject traversal attempts
+    safe_name = src_path.name.replace("/", "_").replace("\\", "_").replace("..", "_")
+    if safe_name in (".", "..", ""):
+        safe_name = "unnamed_attachment"
+    dest_path = Path(dest_dir).expanduser().resolve() / safe_name
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     if dest_path.exists() and skip_existing:

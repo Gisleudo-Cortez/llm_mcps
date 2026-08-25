@@ -14,6 +14,7 @@ Credentials are handled by himalaya's own config.toml — this module never sees
 
 import json
 import logging
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -51,15 +52,17 @@ def _run_himalaya(
 ) -> str:
     """Run himalaya command, return stdout. Raise on non-zero exit.
 
-    v2: --json replaces --output json. --account can go before or after subcommand.
+    v2: --json replaces --output json. --account/--json must precede the
+    positional query tokens (himalaya's parser swallows flags placed after
+    the first non-flag token into the search query).
     Includes retry with 2s backoff for transient IMAP failures.
     """
     cmd = ["himalaya"]
-    cmd.extend(args)
     if account:
         cmd.extend(["--account", account])
     if json_output:
         cmd.append("--json")
+    cmd.extend(args)
 
     last_error: Exception = RuntimeError(f"himalaya failed: {' '.join(cmd)}")
     for attempt in range(retries + 1):
@@ -104,7 +107,7 @@ def list_envelopes(
     Envelope JSON wraps in {"envelopes": [...]} with from/to as object arrays.
     """
     if search_query:
-        args = ["envelope", "search", "-m", folder] + search_query.split()
+        args = ["envelope", "search", "-m", folder, "-s", str(page_size)] + shlex.split(search_query)
     else:
         args = ["envelope", "list", "-m", folder, "-p", str(page), "-s", str(page_size)]
 

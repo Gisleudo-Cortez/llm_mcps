@@ -87,6 +87,9 @@ def _keyword_classify(sender: str, subject: str, body: str) -> ClassificationRes
     )
 
 
+ALLOWED_LABELS = frozenset({"receipt", "financial", "work", "personal", "newsletter", "spam", "urgent", "unsorted"})
+
+
 def _parse_json(response: str) -> dict:
     match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
     if match:
@@ -206,7 +209,15 @@ async def classify_email_async(
 
                 data = _parse_json(response)
                 label = data.get("label", "unsorted")
-                confidence = float(data.get("confidence", 0.5))
+                # Validate label against allowed set (prevents prompt injection)
+                if label not in ALLOWED_LABELS:
+                    label = "unsorted"
+                # Clamp confidence to [0, 1] (prevents NaN/negative abuse)
+                try:
+                    confidence = float(data.get("confidence", 0.5))
+                    confidence = max(0.0, min(1.0, confidence))
+                except (TypeError, ValueError):
+                    confidence = 0.0
                 needs_review = data.get("needs_review", confidence < classification_config.confidence_threshold)
 
                 if confidence >= classification_config.confidence_threshold and not needs_review:

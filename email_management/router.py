@@ -22,13 +22,23 @@ class RoutingRule:
         return fnmatch.fnmatch(recipient.lower(), self.recipient.lower()) and fnmatch.fnmatch(sender.lower(), self.sender.lower())
 
     def compute_path(self, sender: str) -> str:
-        """Expand template variables in the path."""
+        """Expand template variables in the path.
+
+        Sanitizes sender_domain and label to prevent path traversal:
+        only alphanumeric, dots, and hyphens are allowed in domain.
+        """
+        import re
         sender_domain = sender.split("@")[-1] if "@" in sender else sender
+        # Sanitize: only allow valid domain characters (a-z, 0-9, dots, hyphens)
+        # Then strip any remaining .. sequences that could cause path traversal
+        sender_domain = re.sub(r'[^a-zA-Z0-9.\-]', '', sender_domain)
+        sender_domain = sender_domain.replace("..", "")
+        label = re.sub(r'[^a-zA-Z0-9\-]', '', self.label)
         return (
             self.path
             .replace("{sender_domain}", sender_domain)
             .replace("{date}", date.today().isoformat())
-            .replace("{label}", self.label)
+            .replace("{label}", label)
         )
 
 

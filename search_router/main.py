@@ -24,11 +24,16 @@ Engine tool names this router references (implement as separate MCP servers):
 """
 
 import json
+import os
 from typing import Literal, Optional
 
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("search_router")
+
+# When set (e.g. on the VPS, which has no SearXNG), the router never routes
+# to SearXNG — tool_development becomes Brave-primary with Exa fallback.
+_SEARXNG_DISABLED = os.getenv("SEARXNG_DISABLED", "").lower() in ("1", "true", "yes")
 
 # ── Cache integration ────────────────────────────────────────────────────────
 
@@ -490,6 +495,44 @@ def _route_concept(
 
 
 def _route_tool_development(query: str, need_full_text: bool) -> dict:
+    if _SEARXNG_DISABLED:
+        return {
+            "intent": "tool_development",
+            "cache": _cache_section(query, "docs_technical", "VERSIONED", "tool_development"),
+            "strategy": "brave_primary_exa_fallback",
+            "step_1_primary": {
+                "engine": "brave",
+                "tool": "brave_search_web",
+                "params": {
+                    "query": query,
+                    "count": 10,
+                    "extra_snippets": True,
+                    **_goggle("tool_development"),
+                },
+            },
+            "query_preparation": (
+                "Before passing: strip dynamic values (absolute paths, memory addresses, "
+                "timestamps, UUIDs, hex addresses). Add library name + version if it's "
+                "an error message query."
+            ),
+            "fallback_trigger": "brave returns fewer than 3 relevant results",
+            "step_2_fallback": {
+                "engine": "exa",
+                "tool": "exa_search_query",
+                "params": {
+                    "query": query,
+                    "search_type": "keyword",
+                    "num_results": 5,
+                    "include_highlights": True,
+                    "include_text": False,
+                },
+            },
+            "url_extraction": {
+                "tool": "page_scrape_crawl4ai_fetch",
+                "note": "Use for any result URL you want to read in full.",
+            },
+            "cost_note": "Brave primary (SearXNG disabled on this host).",
+        }
     return {
         "intent": "tool_development",
         "cache": _cache_section(query, "docs_technical", "VERSIONED", "tool_development"),
