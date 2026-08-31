@@ -141,7 +141,8 @@ Classifies emails and routes attachments using a tiered async LLM pipeline. Zero
 - **Keyword fallback** triggers when all tiers fail (model not loaded, timeout, no API key). Fast, deterministic, low confidence.
 - **Himalaya wrapper** (`himalaya_wrapper.py`) shells out to the `himalaya` CLI with `--output json`. Credentials live in himalaya's own `config.toml` — this server never sees passwords.
 - **Router** (`router.py`) loads YAML rules with glob-pattern matching on sender/recipient. Paths support `{sender_domain}`, `{date}`, `{label}` templates.
-- **Tools**: `check_connection`, `list_accounts`, `list_rules`, `classify_email_tool`, `filter_attachments`, `route_attachments`, `process_inbox`.
+- **Event log** (`event_log.py`) — durable SQLite store (WAL, `~/.config/email-mcp/email_events.db`, `EMAIL_MCP_EVENT_DB` env override). Every email classified by any tool or the daily digest cron becomes one structured row; pattern aggregation dedupes per unique email (account, sender, subject, label). A refined patterns reference (`email_patterns.yaml` beside the DB) distills durable discovery patterns for LLM consumption; a weekly cron reconciles it.
+- **Tools**: `check_connection`, `list_accounts`, `list_rules`, `classify_email_tool`, `filter_attachments`, `route_attachments`, `process_inbox`, `query_email_log`, `get_email_pattern_stats`.
 - **Config**: `~/.config/email-mcp/server_config.yaml`. See project README for full schema.
 - **Run tests**: `cd email_management && uv run pytest tests/ -v`
 
