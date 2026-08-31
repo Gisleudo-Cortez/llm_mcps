@@ -13,6 +13,8 @@ MCP server for email classification, attachment routing, and inbox processing. B
 | `filter_attachments` | Dry-run: classify + preview routing for emails with attachments |
 | `route_attachments` | Classify, download, and route attachments to computed paths |
 | `process_inbox` | Full pipeline — same as `route_attachments` (dry_run=false) for cron jobs |
+| `query_email_log` | Query the durable event log (recovery: "which account gets AliExpress receipts") |
+| `get_email_pattern_stats` | Aggregate discovery patterns (recurring sender→account→label, rotating local parts, cross-account senders) |
 
 ## Architecture
 
@@ -20,9 +22,21 @@ MCP server for email classification, attachment routing, and inbox processing. B
 main.py                 ← FastMCP server, async tools
 ├── async_classifier.py ← httpx.AsyncClient → Ollama HTTP / OpenRouter
 ├── config.py            ← YAML config loader (~/.config/email-mcp/server_config.yaml)
+├── event_log.py         ← SQLite event store + pattern aggregation (~/.config/email-mcp/email_events.db)
 ├── himalaya_wrapper.py  ← subprocess wrapper around himalaya CLI
 └── router.py            ← YAML rule engine with glob matching
 ```
+
+Every email classified by any tool (or by the daily digest cron, which
+imports this package directly) is appended to the event store — a WAL-mode
+SQLite DB safe for concurrent writers. Pattern aggregation dedupes to one
+row per unique email (account, sender, subject, label), so re-observing
+an email never inflates counts. A refined patterns reference
+(`email_patterns.yaml`, next to the DB) distills recurring patterns for
+LLM-driven discovery and recovery; a weekly cron reconciles it against
+fresh stats.
+
+Set `EMAIL_MCP_EVENT_DB` to override the event store location (tests use this).
 
 ## Setup
 

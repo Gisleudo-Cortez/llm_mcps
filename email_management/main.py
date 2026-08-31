@@ -45,6 +45,7 @@ from mcp.server.fastmcp import FastMCP
 try:
     from .async_classifier import classify_email_async, classify_batch, ClassificationResult
     from .config import load_config, ServerConfig, AccountConfig
+    from .event_log import log_email_events, query_events, pattern_stats
     from .himalaya_wrapper import (
         check_imap_connection,
         download_attachments,
@@ -55,6 +56,7 @@ try:
 except ImportError:
     from async_classifier import classify_email_async, classify_batch, ClassificationResult
     from config import load_config, ServerConfig, AccountConfig
+    from event_log import log_email_events, query_events, pattern_stats
     from himalaya_wrapper import (
         check_imap_connection,
         download_attachments,
@@ -140,12 +142,39 @@ def _audit_log(action: str, details: dict) -> None:
     Records every file operation: routed, skipped, errored.
     Survives restarts — the log is the durable record of what happened.
     """
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "action": action,
-        **details,
-    }
     logger.info("audit: %s %s", action, json.dumps(details, default=str))
+
+
+def _log_events_safe(source: str, account: str, himalaya_account: str, results: list) -> None:
+    """Write classification events to the event store — best-effort side channel.
+
+    A logging failure must never break the tool call that produced the
+    results; failures are logged to the standard log and swallowed.
+    """
+    try:
+        entries = []
+        for r in results:
+            entries.append({
+                "source": source,
+                "account": account,
+                "himalaya_account": himalaya_account,
+                "email_id": r.get("id"),
+                "sender": r.get("sender", ""),
+                "recipient": r.get("recipient", ""),
+                "subject": r.get("subject", ""),
+                "label": r.get("label", ""),
+                "confidence": r.get("confidence", 0),
+                "model_used": r.get("model_used", ""),
+                "action": r.get("action", ""),
+                "routing_path": r.get("routing_path") or "",
+            })
+        log_email_events(entries)
+    except Exception as e:
+        logger.error("event_log write failed (source=%s): %s", source, str(e)[:200])
+
+
+def _himalaya_account_for(acct: AccountConfig) -> str:
+    return acct.himalaya_account or acct.name
 
 
 async def _classify_and_route(acct: AccountConfig, msg_id: int, sender: str, recipient: str, subject: str, body: str) -> dict:
@@ -206,6 +235,7 @@ async def _batch_classify_and_route(acct: AccountConfig, messages: list) -> list
             "id": msg.id,
             "subject": msg.subject[:80],
             "sender": msg.sender,
+            "recipient": msg.recipient,
             "label": cls.label,
             "confidence": cls.confidence,
             "needs_review": cls.needs_review,
@@ -258,6 +288,9 @@ async def filter_attachments(
     # Batch classify
     results = await _batch_classify_and_route(acct, messages)
 
+    # Log to event store (best-effort side channel)
+    _log_events_safe("mcp_filter", account_name, acct.himalaya_account, results)
+
     return {
         "account": account_name,
         "folder": folder,
@@ -285,7 +318,9 @@ async def classify_email_tool(
         return {"error": str(e)}
 
     msg = read_message_body(acct.himalaya_account, email_id)
-    return await _classify_and_route(acct, email_id, msg.sender, msg.recipient, msg.subject, msg.body)
+    result = await _classify_and_route(acct, email_id, msg.sender, msg.recipient, msg.subject, msg.body)
+    _log_events_safe("mcp_classify", account_name, acct.himalaya_account, [result])
+    return result
 
 
 @mcp.tool()
@@ -330,6 +365,9 @@ async def route_attachments(
 
     # Batch classify
     results = await _batch_classify_and_route(acct, messages)
+
+    # Log to event store (best-effort side channel) — source reflects the mode
+    _log_events_safe("mcp_dry_run" if dry_run else "mcp_route", account_name, acct.himalaya_account, results)
 
     logger.info("batch_start account=%s folder=%s scanned=%d with_attachments=%d",
                 account_name, folder, len(envelopes), len(messages))
@@ -537,6 +575,103 @@ def check_connection(account_name: str) -> dict:
         "account": account_name,
         "connected": ok,
     }
+
+
+@mcp.tool()
+def query_email_log(
+    account: str = "",
+    sender_like: str = "",
+    label: str = "",
+    source: str = "",
+    action: str = "",
+    days: int = 0,
+    limit: int = 50,
+) -> dict:
+    """Query the durable email event log (every email classified/routed by any
+    email-management tool or the daily digest scan).
+
+    **TRIGGER CONDITION:** Use to recover past email discoveries — "which
+    account receives AliExpress receipts", "when did TIM bills arrive",
+    "where were Nubank emails routed". Filters are AND-combined; empty
+    filters return the most recent events.
+
+    **SEQUENCE GUIDANCE:** get_email_pattern_stats first for aggregate
+    patterns; query_email_log to drill into a specific sender/label.
+
+    **CONSTRAINT WARNING:** sender_like is a case-insensitive substring
+    ('aliexpress' catches all AliExpress subdomains). days=0 means all
+    time. limit capped at 1000.
+
+    **OUTPUT EXPECTATION:** JSON {count, events: [{timestamp, source,
+    account, sender, recipient, subject, label, confidence, model_used,
+    action, routing_path}]}.
+    """
+    try:
+        rows = query_events(
+            account=account,
+            sender_like=sender_like,
+            label=label,
+            source=source,
+            action=action,
+            days=days if days > 0 else None,
+            limit=limit,
+        )
+    except Exception as e:
+        return {"error": str(e)[:300]}
+
+    return {
+        "count": len(rows),
+        "events": [
+            {
+                "timestamp": r["timestamp"],
+                "source": r["source"],
+                "account": r["account"],
+                "sender": r["sender"],
+                "recipient": r["recipient"],
+                "subject": r["subject"],
+                "label": r["label"],
+                "confidence": r["confidence"],
+                "model_used": r["model_used"],
+                "action": r["action"],
+                "routing_path": r["routing_path"],
+            }
+            for r in rows
+        ],
+    }
+
+
+@mcp.tool()
+def get_email_pattern_stats(
+    min_count: int = 2,
+    domain_min_count: int = 3,
+    limit: int = 30,
+) -> dict:
+    """Aggregate email discovery patterns from the event log — recurring
+    sender→account→label patterns, rotating-local-part senders grouped by
+    domain, cross-account senders, and per-account label mix.
+
+    **TRIGGER CONDITION:** Use to discover "what kinds of email land in
+    which account" — e.g. shopping confirmations cluster in one account,
+    a supplier's invoices always arrive in another. Also use before
+    writing new routing rules to see what actually recurs.
+
+    **SEQUENCE GUIDANCE:** Call this first, then query_email_log to drill
+    into any pattern that matters. Feed durable findings into
+    ~/.config/email-mcp/email_patterns.yaml (the refined reference file).
+
+    **CONSTRAINT WARNING:** Counts are deduped per unique email (account,
+    sender, subject, label) — re-observing the same email does not
+    inflate counts. needs_attention lists unsorted/low-confidence
+    candidates for new rules.
+
+    **OUTPUT EXPECTATION:** JSON {sender_label_patterns, domain_label_patterns
+    (catches bulk senders like AliExpress that rotate local parts),
+    cross_account_senders, label_distribution, needs_attention, totals}.
+    """
+    try:
+        return pattern_stats(min_count=min_count, domain_min_count=domain_min_count, limit=limit)
+    except Exception as e:
+        return {"error": str(e)[:300]}
 
 
 def main():
