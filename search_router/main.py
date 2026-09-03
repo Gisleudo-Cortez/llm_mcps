@@ -544,6 +544,7 @@ def _route_tool_development(query: str, need_full_text: bool) -> dict:
                 "query": query,
                 "categories": "it",
                 "num_results": 10,
+                "language": "en-US",
             },
             "query_preparation": (
                 "Before passing: strip dynamic values (absolute paths, memory addresses, "

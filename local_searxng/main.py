@@ -46,7 +46,7 @@ def web_search(
     num_results: int = 5,
     categories: str = "general",
     time_range: Literal["", "day", "week", "month", "year"] = "",
-    language: str = "all",
+    language: str = "en-US",
 ) -> str:
     """
     Search the web for real-time information using a local SearXNG metasearch engine.
@@ -90,7 +90,9 @@ def web_search(
         num_results: How many results to return (3–10 recommended for token efficiency).
         categories: Comma-separated categories — 'general', 'news', 'science', 'it', 'social media'.
         time_range: Recency filter. Leave blank for all-time. Use 'day'/'week' for breaking news.
-        language: Language code (e.g., 'en-US', 'pt-BR', 'all').
+        language: Language code. Default is 'en-US' (pinned 2026-09-03: 'all'/'auto'
+            sends Bing no mkt param -> IP-geo wrong-market noise). Pass 'pt-BR'
+            explicitly for Brazilian Portuguese queries.
     """
     params = {
         "q": query,
