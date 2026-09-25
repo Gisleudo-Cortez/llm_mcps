@@ -38,6 +38,28 @@ fresh stats.
 
 Set `EMAIL_MCP_EVENT_DB` to override the event store location (tests use this).
 
+## Daily digest (scheduled job)
+
+`daily_digest.py` is a standalone scheduled job (systemd user timer, not an
+MCP tool) that scans every account, classifies new mail, writes a report, and
+pings Telegram. It imports this package directly — run it from this directory.
+
+Account list lives OUTSIDE the repo, in a private JSON file
+(`~/.config/email-mcp/digest_accounts.json` by default):
+
+```json
+{
+  "mcp_name": {"display": "user@example.com", "group": "Work"}
+}
+```
+
+JSON insertion order defines group order in the report. It holds real
+addresses — never commit it. Override with `EMAIL_MCP_ACCOUNTS_FILE`.
+
+Environment variables: `EMAIL_MCP_STATE_DB` (processed-email state DB),
+`EMAIL_DIGEST_REPORT_DIR` (report output dir), `TELEGRAM_BOT_TOKEN` +
+`TELEGRAM_HOME_CHANNEL` (summary ping, read at runtime).
+
 ## Setup
 
 1. Install himalaya and configure IMAP accounts in its config.toml.
