@@ -6,7 +6,8 @@ email MCP server's classifier + himalaya wrapper directly.
 
 Schedule: email-digest.timer (systemd user unit), twice daily.
 Output: report file + Telegram summary ping.
-State: SQLite DB tracks processed email IDs.
+State: SQLite DB tracks processed email IDs. --dry-run runs the full chain
+(scan + classify + report to stdout) with zero persistence.
 
 Configuration (environment variables):
   EMAIL_MCP_ACCOUNTS_FILE  JSON account map: {mcp_name: {display, group}}
@@ -17,6 +18,7 @@ Configuration (environment variables):
   TELEGRAM_HOME_CHANNEL    destination chat for the summary ping.
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -160,7 +162,7 @@ async def scan_account(account_name, himalaya_account, page_size=20):
     return envs, messages
 
 
-async def run_digest(conn, cfg, accounts):
+async def run_digest(conn, cfg, accounts, dry_run=False):
     """Run the full digest across all accounts."""
     report_lines = []
     telegram_lines = []
@@ -255,15 +257,16 @@ async def run_digest(conn, cfg, accounts):
                 "action": "noted",
                 "timestamp": datetime.now().isoformat(),
             })
-            # Mark as processed
-            mark_processed(conn, mcp_name, msg["id"], label, cls.confidence,
-                           msg["subject"], msg["sender"])
+            # Mark as processed (skipped in dry-run)
+            if not dry_run:
+                mark_processed(conn, mcp_name, msg["id"], label, cls.confidence,
+                               msg["subject"], msg["sender"])
             # Update totals
             total_by_label[label] = total_by_label.get(label, 0) + 1
             total_new += 1
 
         # Write to the shared event store (best-effort — digest never dies on logging)
-        if event_entries:
+        if event_entries and not dry_run:
             try:
                 log_email_events(event_entries)
             except Exception as e:
@@ -349,11 +352,26 @@ async def run_digest(conn, cfg, accounts):
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Daily email digest — scan, classify, report, Telegram ping.")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="run scan + classify + build report, but skip all persistence: "
+             "no state-DB marking, no event log, no report file, no Telegram.")
+    args = parser.parse_args()
+
     accounts = load_accounts()
     conn = init_db()
     cfg = load_config()
 
-    report_text, telegram_text = asyncio.run(run_digest(conn, cfg, accounts))
+    report_text, telegram_text = asyncio.run(
+        run_digest(conn, cfg, accounts, dry_run=args.dry_run))
+
+    if args.dry_run:
+        print(report_text)
+        print("[dry-run] state DB, event log, report file, and Telegram all skipped.")
+        conn.close()
+        return
 
     # Write report file
     REPORT_DIR.mkdir(parents=True, exist_ok=True)

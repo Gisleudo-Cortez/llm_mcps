@@ -60,6 +60,10 @@ Environment variables: `EMAIL_MCP_STATE_DB` (processed-email state DB),
 `EMAIL_DIGEST_REPORT_DIR` (report output dir), `TELEGRAM_BOT_TOKEN` +
 `TELEGRAM_HOME_CHANNEL` (summary ping, read at runtime).
 
+`--dry-run` runs the full chain (scan + classify + report to stdout) with
+zero persistence — no state-DB marking, no event log, no report file, no
+Telegram. Safe for smoke tests against real accounts.
+
 ## Setup
 
 1. Install himalaya and configure IMAP accounts in its config.toml.
